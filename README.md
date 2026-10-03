@@ -16,9 +16,53 @@
 | 🔐 管理安全 | 首次自设用户名+密码（scrypt 加盐哈希，明文不落盘）；一次性设置令牌防抢注；登录 5 次错锁 10 分钟；HttpOnly 会话 Cookie 防 XSS 窃取 |
 | 🌐 配套 | 公开模型广场（脱敏状态页）、明暗双主题、配置备份导出/导入 |
 
-## 快速开始
+## 一键安装（推荐）
 
-前置：Node.js ≥ 18（推荐 bun）
+仓库根目录带两个安装脚本，装完会注册成常驻服务并开机自启，不需要手工敲下面的步骤。
+
+### Linux（Ubuntu / Debian / RHEL / Alpine / Arch / openSUSE）
+
+```bash
+T=ghp_你的GitHub令牌       # 私有仓库需 PAT，勾选 repo
+curl -fsSL -H "Authorization: Bearer $T" -H "Accept: application/vnd.github.raw" \
+  https://api.github.com/repos/plxlaaa/api-hub/contents/install-api-hub.sh \
+  -o install-api-hub.sh
+bash install-api-hub.sh --token "$T" --domain hub.example.com
+```
+
+`--domain` 可选，填了会自动装 Caddy 并签发 HTTPS 证书。脚本会：装 Node 20+ / bun → 拉取源码 →
+装依赖 → 生成 Prisma Client → 建库 → 构建 → 注册 systemd 服务 → 健康检查 → 打印首次设置令牌。
+
+| 动作 | 命令 |
+|------|------|
+| 更新代码（自动备份 db） | `bash install-api-hub.sh --update --token "$T"` |
+| 查看状态 / 设置令牌 | `bash install-api-hub.sh --status` |
+| 只做环境自检 | `bash install-api-hub.sh --precheck` |
+| 卸载（保留数据库） | `bash install-api-hub.sh --uninstall` |
+| 卸载并删除数据库 | `bash install-api-hub.sh --uninstall --purge` |
+
+常用参数：`-d/--dir` 安装目录（默认 `/opt/api-hub`）、`-p/--port`（默认 3000）、
+`-b/--branch`（默认 main）、`--cn` 走 npmmirror 镜像。需要 systemd；容器内运行请自行 nohup。
+
+### Windows 10 / 11（管理员 PowerShell）
+
+```powershell
+$env:GITHUB_TOKEN='ghp_你的GitHub令牌'
+irm "https://api.github.com/repos/plxlaaa/api-hub/contents/install-api-hub.ps1" `
+  -Headers @{Authorization="Bearer $env:GITHUB_TOKEN"; Accept="application/vnd.github.raw"} `
+  -OutFile install-api-hub.ps1
+.\install-api-hub.ps1 -Token $env:GITHUB_TOKEN
+```
+
+默认注册**计划任务**（用户登录时自动启动）；要开机即启请先装
+[nssm](https://nssm.cc/) 再加 `-UseNssm` 注册为真正的 Windows 服务。
+`-Update` / `-Status` / `-Uninstall` / `-Precheck` 与 Linux 版对应。
+
+> 令牌只用来拉私有仓库源码，脚本不会上传任何数据。别把它写进脚本或提交到仓库。
+
+## 手动开始
+
+前置：Node.js ≥ 20（推荐 bun）。上面脚本已覆盖的场景不用看这段。
 
 ```bash
 # 先跑环境自检
@@ -39,6 +83,16 @@ bun run dev        # http://localhost:3000
 建号成功即焚毁。之后用用户名+密码登录，再到「渠道管理」添加你的上游 Key。
 
 详细部署步骤与故障排查见 [HANDOVER.md](HANDOVER.md)；数据库（含密钥）不在仓库内，用管理台「配置备份」迁移。
+
+装完服务在哪：
+
+| 项 | 位置 |
+|------|------|
+| 安装目录 | Linux `/opt/api-hub` · Windows `C:\api-hub` |
+| 数据库 | `<安装目录>/db/custom.db`（明文 Key，勿外传） |
+| 服务名 | Linux `api-hub` · Windows 计划任务 `APIHub` |
+| 看日志 | `journalctl -u api-hub -f` |
+
 
 ## 统一调用示例
 
