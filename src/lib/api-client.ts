@@ -1,5 +1,3 @@
-const TOKEN_STORAGE_KEY = 'gw_admin_token'
-
 export class ApiError extends Error {
   status: number
   constructor(message: string, status: number) {
@@ -8,27 +6,16 @@ export class ApiError extends Error {
   }
 }
 
-export function getStoredToken(): string | null {
-  if (typeof window === 'undefined') return null
-  return localStorage.getItem(TOKEN_STORAGE_KEY)
-}
-
-export function setAuthToken(token: string | null): void {
-  if (typeof window === 'undefined') return
-  if (token) localStorage.setItem(TOKEN_STORAGE_KEY, token)
-  else localStorage.removeItem(TOKEN_STORAGE_KEY)
-}
-
-/** 统一 fetch：自动带 Content-Type 与 Authorization Bearer，401 时清除本地登录态 */
+/**
+ * 统一 fetch：会话走 HttpOnly Cookie（浏览器同源自动携带，无需也不能在 JS 里读取）。
+ * 401 表示未登录/会话过期，抛出由上层跳登录页。
+ */
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers)
   if (options.body && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json')
-  const token = getStoredToken()
-  if (token) headers.set('Authorization', `Bearer ${token}`)
 
-  const res = await fetch(path, { ...options, headers })
+  const res = await fetch(path, { ...options, headers, credentials: 'same-origin' })
   if (res.status === 401) {
-    setAuthToken(null)
     throw new ApiError('登录已过期，请重新登录', 401)
   }
   const data = (await res.json().catch(() => ({}))) as T & { error?: string }

@@ -10,7 +10,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { api, fmtTime, getStoredToken } from '@/lib/api-client'
+import { api, fmtTime } from '@/lib/api-client'
 import type { ApiTokenItem, Channel, ProbeLogItem, Stats } from '@/types'
 import { cn } from '@/lib/utils'
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from 'recharts'
@@ -87,10 +87,10 @@ export function DashboardTab() {
   const topChannels = [...channels].filter((c) => (c.stats?.calls ?? 0) > 0).sort((a, b) => (b.stats?.calls ?? 0) - (a.stats?.calls ?? 0)).slice(0, 5)
   const [trendMode, setTrendMode] = useState<'24h' | '7d'>('24h')
 
-  // 配置备份（fetch+blob 下载，带 Authorization 头）
+  // 配置备份（fetch+blob 下载，Cookie 会话自动携带）
   const exportConfig = async (withKeys: boolean) => {
     try {
-      const res = await fetch(`/api/config/export${withKeys ? '?keys=1' : ''}`, { headers: { Authorization: `Bearer ${getStoredToken() ?? ''}` } })
+      const res = await fetch(`/api/config/export${withKeys ? '?keys=1' : ''}`)
       if (!res.ok) throw new Error(`导出失败 (${res.status})`)
       const blob = await res.blob()
       const a = document.createElement('a')

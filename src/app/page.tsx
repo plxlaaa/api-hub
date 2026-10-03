@@ -15,7 +15,6 @@ import { RequestLogsTab } from '@/components/request-logs-tab'
 import { TokensTab } from '@/components/tokens-tab'
 import { UsageTab } from '@/components/usage-tab'
 import { ThemeToggle } from '@/components/theme-toggle'
-import { getStoredToken, setAuthToken } from '@/lib/api-client'
 
 function Shell({ onLogout }: { onLogout: () => void }) {
   return (
@@ -75,45 +74,36 @@ function Shell({ onLogout }: { onLogout: () => void }) {
 
 export default function Home() {
   const [queryClient] = useState(() => new QueryClient({ defaultOptions: { queries: { retry: 1 } } }))
-  const [token, setToken] = useState<string | null>(null)
+  const [authed, setAuthed] = useState<boolean | null>(null)
   const [checking, setChecking] = useState(true)
 
   useEffect(() => {
     let cancelled = false
-    const finish = () => { if (!cancelled) setChecking(false) }
     ;(async () => {
-      const stored = getStoredToken()
-      if (!stored) {
-        queueMicrotask(finish)
-        return
-      }
       try {
-        const res = await fetch('/api/channels', { headers: { Authorization: `Bearer ${stored}` } })
-        if (res.ok) { if (!cancelled) setToken(stored) } else setAuthToken(null)
+        const res = await fetch('/api/auth/me', { credentials: 'same-origin' })
+        if (!cancelled) setAuthed(res.ok)
       } catch {
-        setAuthToken(null)
+        if (!cancelled) setAuthed(false)
       } finally {
-        finish()
+        if (!cancelled) setChecking(false)
       }
     })()
     return () => { cancelled = true }
   }, [])
 
-  const handleAuth = useCallback((t: string) => {
-    setAuthToken(t)
-    setToken(t)
-  }, [])
+  const handleAuth = useCallback(() => { setAuthed(true) }, [])
 
-  const handleLogout = useCallback(() => {
-    setAuthToken(null)
-    setToken(null)
+  const handleLogout = useCallback(async () => {
+    await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' }).catch(() => {})
+    setAuthed(false)
   }, [])
 
   return (
     <QueryClientProvider client={queryClient}>
       {checking ? (
         <div className="min-h-screen flex items-center justify-center text-muted-foreground">加载中…</div>
-      ) : token ? (
+      ) : authed ? (
         <Shell onLogout={handleLogout} />
       ) : (
         <LoginView onAuth={handleAuth} />

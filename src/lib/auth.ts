@@ -1,12 +1,14 @@
 import { SignJWT, jwtVerify } from 'jose'
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
 import { db } from '@/lib/db'
+import { loadCredentials, saveCredentials } from '@/lib/credentials'
 
-const SETTING_PASSWORD = 'adminPasswordHash'
 const SETTING_JWT_SECRET = 'jwtSecret'
 const TOKEN_EXPIRES = '30d'
+const SESSION_COOKIE = 'ah_session'
+const SESSION_MAX_AGE = 30 * 24 * 60 * 60 // 30 天
 
-// ---------- Setting 存取 ----------
+// ---------- Setting 存取（仅用于 JWT 密钥等非用户凭据） ----------
 
 export async function getSetting(key: string): Promise<string | null> {
   const row = await db.setting.findUnique({ where: { key } })
@@ -24,7 +26,7 @@ export async function setSetting(key: string, value: string): Promise<void> {
 }
 
 export async function isInitialized(): Promise<boolean> {
-  return (await getSetting(SETTING_PASSWORD)) !== null
+  return (await loadCredentials()) !== null
 }
 
 // ---------- 密码哈希（scrypt） ----------
@@ -62,11 +64,70 @@ export async function signAdminToken(): Promise<string> {
     .sign(await getJwtSecret())
 }
 
-// ---------- 管理端鉴权 guard ----------
+// ---------- 会话 Cookie（HttpOnly，防 XSS 窃取；面板级做法） ----------
+
+function isHttps(req: Request): boolean {
+  const proto = (req.headers.get('x-forwarded-proto') || '').split(',')[0].trim()
+  if (proto === 'https') return true
+  try {
+    return new URL(req.url).protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+/** 构造会话 Cookie：HttpOnly + SameSite=Lax，https 下追加 Secure */
+export function sessionCookie(req: Request, token: string): string {
+  const parts = [
+    `${SESSION_COOKIE}=${token}`,
+    'Path=/',
+    'HttpOnly',
+    'SameSite=Lax',
+    `Max-Age=${SESSION_MAX_AGE}`,
+  ]
+  if (isHttps(req)) parts.push('Secure')
+  return parts.join('; ')
+}
+
+/** 清除会话 Cookie（登出） */
+function clearSessionCookie(req: Request): string {
+  const parts = [`${SESSION_COOKIE}=`, 'Path=/', 'HttpOnly', 'SameSite=Lax', 'Max-Age=0']
+  if (isHttps(req)) parts.push('Secure')
+  return parts.join('; ')
+}
+
+/** 构造 JSON 响应并（可选）附带 Set-Cookie（显式传入 headers，避免 Set-Cookie 被 headers guard 拦截） */
+export function jsonWithCookie(data: unknown, cookie?: string, status = 200): Response {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (cookie) headers['Set-Cookie'] = cookie
+  return new Response(JSON.stringify(data), { status, headers })
+}
+
+export function withSessionCookie(req: Request, token: string): string {
+  return sessionCookie(req, token)
+}
+
+export function clearedSessionCookie(req: Request): string {
+  return clearSessionCookie(req)
+}
+
+// ---------- 管理端鉴权 guard（Cookie 优先，兼容 Authorization 头） ----------
+
+function tokenFromRequest(req: Request): string {
+  const cookie = req.headers.get('cookie') || ''
+  for (const part of cookie.split(';')) {
+    const eq = part.indexOf('=')
+    if (eq > 0 && part.slice(0, eq).trim() === SESSION_COOKIE) {
+      return decodeURIComponent(part.slice(eq + 1).trim())
+    }
+  }
+  const auth = req.headers.get('authorization') || ''
+  if (auth.startsWith('Bearer ')) return auth.slice(7).trim()
+  return ''
+}
 
 export async function requireAdmin(req: Request): Promise<Response | null> {
-  const auth = req.headers.get('authorization') || ''
-  const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : ''
+  const token = tokenFromRequest(req)
   if (!token) return unauthorized()
   try {
     await jwtVerify(token, await getJwtSecret())
@@ -82,15 +143,15 @@ export function unauthorized(): Response {
 
 // ---------- 初始化 / 登录 ----------
 
-export async function setupAdmin(password: string): Promise<string> {
-  await setSetting(SETTING_PASSWORD, hashPassword(password))
+export async function setupAdmin(username: string, password: string): Promise<string> {
+  await saveCredentials({ username, passwordHash: hashPassword(password) })
   return signAdminToken()
 }
 
-// ---------- 登录防爆破（内存滑动窗口：连续失败 5 次锁定 15 分钟） ----------
+// ---------- 登录防爆破（同宝塔/1Panel 策略：连续失败 5 次锁定 10 分钟） ----------
 
 const LOCK_THRESHOLD = 5
-const LOCK_WINDOW_MS = 15 * 60_000
+const LOCK_WINDOW_MS = 10 * 60_000
 const loginAttempts = new Map<string, { count: number; firstAt: number; lockedUntil: number }>()
 
 function clientKey(req: Request): string {
@@ -128,10 +189,15 @@ export function recordLoginSuccess(req: Request): void {
   loginAttempts.delete(clientKey(req))
 }
 
-export async function loginAdmin(req: Request, password: string): Promise<string | null> {
+export async function loginAdmin(
+  req: Request,
+  username: string,
+  password: string,
+): Promise<string | null> {
   if (loginLockRemaining(req) > 0) return null
-  const stored = await getSetting(SETTING_PASSWORD)
-  const ok = stored !== null && verifyPassword(password, stored)
+  const creds = await loadCredentials()
+  if (!creds) return null
+  const ok = creds.username === username && verifyPassword(password, creds.passwordHash)
   if (!ok) {
     recordLoginFailure(req)
     return null

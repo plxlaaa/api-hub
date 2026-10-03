@@ -4,6 +4,8 @@ node_modules/
 *.log
 db/custom.db
 db/custom.db-journal
+db/credentials.env
+db/setup-token.txt
 .env*.local
 .DS_Store
 tsconfig.tsbuildinfo

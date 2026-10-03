@@ -15,7 +15,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { api, fmtTime, getStoredToken } from '@/lib/api-client'
+import { api, fmtTime } from '@/lib/api-client'
 import type { RequestLogItem } from '@/types'
 
 export function RequestLogsTab() {
@@ -136,7 +136,7 @@ export function RequestLogsTab() {
                   if (channelFilter !== 'all') params.set('channelName', channelFilter)
                   if (okFilter !== 'all') params.set('ok', okFilter)
                   if (tokenFilter !== 'all') params.set('tokenName', tokenFilter)
-                  const res = await fetch(`/api/request-logs/export?${params}`, { headers: { Authorization: `Bearer ${getStoredToken() ?? ''}` } })
+                  const res = await fetch(`/api/request-logs/export?${params}`)
                   if (!res.ok) throw new Error(`导出失败 (${res.status})`)
                   const blob = await res.blob()
                   const a = document.createElement('a')

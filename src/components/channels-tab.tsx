@@ -19,7 +19,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Switch } from '@/components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
-import { api, getStoredToken, fmtTokens } from '@/lib/api-client'
+import { api, fmtTokens } from '@/lib/api-client'
 import { cn } from '@/lib/utils'
 import type { Channel, ChatTestResult, ExportedConfig } from '@/types'
 
@@ -175,8 +175,7 @@ export function ChannelsTab() {
   // 导出配置（下载 JSON）
   const exportConfig = async () => {
     try {
-      const token = getStoredToken()
-      const res = await fetch('/api/config/export', { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+      const res = await fetch('/api/config/export')
       if (!res.ok) throw new Error(`导出失败（${res.status}）`)
       const blob = await res.blob()
       const url = URL.createObjectURL(blob)

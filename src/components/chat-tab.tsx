@@ -10,7 +10,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Slider } from '@/components/ui/slider'
 import { Textarea } from '@/components/ui/textarea'
-import { api, getStoredToken } from '@/lib/api-client'
+import { api } from '@/lib/api-client'
 import { cn } from '@/lib/utils'
 import type { Channel, ModelRoute } from '@/types'
 
@@ -146,7 +146,7 @@ export function ChatTab() {
       ]
       const res = await fetch(byChannel ? `/api/channels/${channelId}/test-chat` : '/api/test-chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${getStoredToken() ?? ''}` },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           ...(byChannel ? {} : { model: routeName }),
           messages: apiMessages,
