@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { CheckCircle2, FileDown, MessageSquare, RefreshCw, Trash2, XCircle } from 'lucide-react'
+import { FileDown, MessageSquare, RefreshCw, ScrollText, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
@@ -11,10 +11,11 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { EmptyState, SkeletonRows } from '@/components/feedback'
+import { KeyValue, LatencyReadout, StatusChip, Truncate } from '@/components/metrics'
+import { ResponsiveList } from '@/components/responsive-list'
 import { api, fmtTime } from '@/lib/api-client'
 import type { RequestLogItem } from '@/types'
 
@@ -70,12 +71,15 @@ export function RequestLogsTab() {
   return (
     <div className="space-y-4">
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0">
-          <CardTitle className="flex items-center gap-2 text-base">
-            <MessageSquare className="h-4 w-4" /> 网关调用日志
-            <span className="text-xs font-normal text-muted-foreground">（最近 {logs.length} 条 / 最多保留 2000 条）</span>
+        <CardHeader className="flex min-w-0 flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <CardTitle className="flex flex-wrap items-center gap-x-2 gap-y-1 text-base">
+            <MessageSquare className="h-4 w-4 shrink-0" />
+            网关调用日志
+            <span className="text-caption font-normal text-muted-foreground">
+              最近 <span className="tabular">{logs.length}</span> 条 · 最多保留 2000 条
+            </span>
           </CardTitle>
-          <div className="flex flex-wrap items-center gap-2">
+          <div className="no-scrollbar -mx-1 flex w-full min-w-0 items-center gap-1.5 overflow-x-auto px-1">
             <Select value={modelFilter} onValueChange={setModelFilter}>
               <SelectTrigger className="h-8 w-40 text-xs" title="按模型筛选">
                 <SelectValue placeholder="全部模型" />
@@ -175,71 +179,165 @@ export function RequestLogsTab() {
         </CardHeader>
         <CardContent>
           {isLoading ? (
-            <div className="flex h-24 items-center justify-center text-muted-foreground">加载中…</div>
+            <SkeletonRows rows={6} />
           ) : logs.length === 0 ? (
-            <div className="flex h-24 items-center justify-center text-sm text-muted-foreground">
-              暂无调用记录 —— 用统一 Key 对网关发起一次对话后，这里会记录每次调用的明细
-            </div>
+            <EmptyState
+              compact
+              icon={ScrollText}
+              title="暂无调用记录"
+              description="用统一 Key 对网关发起一次对话后，这里会逐条记录模型、渠道、延迟、Token 与失败原因。"
+              action={
+                <Button size="sm" variant="outline" asChild>
+                  <a href="?tab=chat">去对话测试</a>
+                </Button>
+              }
+            />
           ) : (
-            <ScrollArea className="max-h-[28rem]">
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>时间</TableHead>
-                    <TableHead>模型</TableHead>
-                    <TableHead className="hidden md:table-cell">尝试</TableHead>
-                    <TableHead className="hidden md:table-cell">密钥</TableHead>
-                    <TableHead>结果</TableHead>
-                    <TableHead>延迟</TableHead>
-                    <TableHead className="hidden sm:table-cell">Tokens</TableHead>
-                    <TableHead className="hidden lg:table-cell">详情</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {logs.map((l) => (
-                    <TableRow key={l.id}>
-                      <TableCell className="whitespace-nowrap text-xs">{fmtTime(l.createdAt)}</TableCell>
-                      <TableCell className="max-w-40 truncate text-sm font-medium" title={`${l.model} → ${l.targetModel}`}>
-                        {l.model}
-                        {l.stream && <Badge variant="secondary" className="ml-1.5 px-1 py-0 text-[10px]">流</Badge>}
-                      </TableCell>
-                      <TableCell className="max-w-36 truncate text-sm text-muted-foreground" title={l.channelName}>{l.channelName}</TableCell>
-                      <TableCell className="hidden md:table-cell">
-                        {l.attempt != null && l.attempt > 1 ? (
-                          <Badge variant="outline" className="border-amber-300 px-1.5 py-0 text-[10px] text-amber-600">第 {l.attempt} 次</Badge>
+            <div className="max-h-[32rem] overflow-y-auto pr-1">
+              <ResponsiveList
+                keyOf={(l) => (l._raw as RequestLogItem).id}
+                className="space-y-1.5"
+                columns={[
+                  { key: 'time', header: '时间', className: 'whitespace-nowrap' },
+                  { key: 'model', header: '模型' },
+                  { key: 'channel', header: '渠道' },
+                  { key: 'attempt', header: '尝试', className: 'hidden md:table-cell' },
+                  { key: 'token', header: '密钥', className: 'hidden md:table-cell' },
+                  { key: 'result', header: '结果' },
+                  { key: 'latency', header: '延迟', align: 'right' },
+                  { key: 'tokens', header: 'Tokens', align: 'right', className: 'hidden sm:table-cell' },
+                  { key: 'detail', header: '详情', className: 'hidden lg:table-cell max-w-64' },
+                ]}
+                items={logs.map((l) => ({
+                  title: (
+                    <span className="flex items-center gap-1.5">
+                      <span className="truncate font-medium">{l.model}</span>
+                      {l.stream && (
+                        <Badge variant="secondary" className="shrink-0 px-1 py-0 text-micro">
+                          流
+                        </Badge>
+                      )}
+                    </span>
+                  ),
+                  subtitle: l.channelName,
+                  badge: l.ok ? <StatusChip kind="ok">成功</StatusChip> : <StatusChip kind="danger">失败</StatusChip>,
+                  metrics: [
+                    { label: '延迟', value: <LatencyReadout ms={l.latencyMs} /> },
+                    {
+                      label: 'Tokens',
+                      value: l.totalTokens == null ? <span className="text-muted-foreground">—</span> : <span className="tabular">{l.totalTokens.toLocaleString()}</span>,
+                    },
+                    {
+                      label: '尝试',
+                      value:
+                        l.attempt != null && l.attempt > 1 ? (
+                          <span className="text-status-warn">第 {l.attempt} 次</span>
                         ) : (
-                          <span className="text-xs text-muted-foreground">首发</span>
-                        )}
-                      </TableCell>
-                      <TableCell className="hidden max-w-28 truncate text-xs text-muted-foreground md:table-cell" title={l.tokenName || '管理员测试'}>{l.tokenName || '（管理测试）'}</TableCell>
-                      <TableCell>
-                        {l.ok ? (
-                          <Badge variant="outline" className="gap-1 border-emerald-300 text-emerald-600"><CheckCircle2 className="h-3 w-3" />成功</Badge>
-                        ) : (
-                          <Badge variant="outline" className="gap-1 border-red-300 text-red-600"><XCircle className="h-3 w-3" />失败</Badge>
-                        )}
-                      </TableCell>
-                      <TableCell className="text-xs">{l.latencyMs != null ? `${(l.latencyMs / 1000).toFixed(1)} s` : '—'}</TableCell>
-                      <TableCell className="hidden text-xs sm:table-cell">{l.totalTokens ?? '—'}</TableCell>
-                      <TableCell className="hidden max-w-64 truncate text-xs text-muted-foreground lg:table-cell">
-                        {l.error ? (
-                          <TooltipProvider delayDuration={200}>
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <span className="cursor-help text-destructive">{l.statusCode ? `HTTP ${l.statusCode} ` : ''}{l.error}</span>
-                              </TooltipTrigger>
-                              <TooltipContent className="max-w-sm break-all"><p className="text-xs">{l.statusCode ? `HTTP ${l.statusCode} ` : ''}{l.error}</p></TooltipContent>
-                            </Tooltip>
-                          </TooltipProvider>
-                        ) : (
-                          `→ ${l.targetModel}`
-                        )}
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </ScrollArea>
+                          <span className="text-muted-foreground">首发</span>
+                        ),
+                    },
+                    {
+                      label: '实际模型',
+                      value: <span className="mono-id truncate">{l.targetModel}</span>,
+                    },
+                  ],
+                  detail: l.error ? (
+                    <p className="break-words text-caption text-status-danger">
+                      {l.statusCode ? `HTTP ${l.statusCode} · ` : ''}
+                      {l.error}
+                    </p>
+                  ) : (
+                    <div className="flex flex-col gap-1.5">
+                      <KeyValue label="发起密钥">{l.tokenName || '（管理员测试）'}</KeyValue>
+                      <KeyValue label="实际模型" mono>
+                        {l.targetModel}
+                      </KeyValue>
+                      <KeyValue label="时间">{fmtTime(l.createdAt)}</KeyValue>
+                      {l.statusCode && <KeyValue label="状态码">HTTP {l.statusCode}</KeyValue>}
+                    </div>
+                  ),
+                  _raw: l,
+                }))}
+                renderCell={(item, key) => {
+                  const l = item._raw as RequestLogItem
+                  switch (key) {
+                    case 'time':
+                      return <span className="tabular text-micro whitespace-nowrap text-muted-foreground">{fmtTime(l.createdAt)}</span>
+                    case 'model':
+                      return (
+                        <div className="min-w-0 max-w-40">
+                          <div className="flex items-center gap-1.5">
+                            <p className="truncate font-medium">{l.model}</p>
+                            {l.stream && (
+                              <Badge variant="secondary" className="shrink-0 px-1 py-0 text-micro">
+                                流
+                              </Badge>
+                            )}
+                          </div>
+                          <p className="mono-id truncate text-micro text-muted-foreground">→ {l.targetModel}</p>
+                        </div>
+                      )
+                    case 'channel':
+                      return <Truncate className="max-w-36 text-caption text-muted-foreground">{l.channelName}</Truncate>
+                    case 'attempt':
+                      return l.attempt != null && l.attempt > 1 ? (
+                        <Badge variant="outline" className="border-status-warn/40 bg-status-warn-soft px-1.5 py-0 text-micro text-status-warn">
+                          第 {l.attempt} 次
+                        </Badge>
+                      ) : (
+                        <span className="text-micro text-muted-foreground">首发</span>
+                      )
+                    case 'token':
+                      return (
+                        <Truncate className="max-w-28 text-micro text-muted-foreground" title={l.tokenName || '管理员测试'}>
+                          {l.tokenName || '（管理测试）'}
+                        </Truncate>
+                      )
+                    case 'result':
+                      return l.ok ? (
+                        <StatusChip kind="ok">成功</StatusChip>
+                      ) : (
+                        <StatusChip kind="danger" title={l.error ?? undefined}>
+                          {l.statusCode ? String(l.statusCode) : '失败'}
+                        </StatusChip>
+                      )
+                    case 'latency':
+                      return (
+                        <div className="text-right">
+                          <LatencyReadout ms={l.latencyMs} />
+                        </div>
+                      )
+                    case 'tokens':
+                      return (
+                        <span className="tabular text-caption">{l.totalTokens?.toLocaleString() ?? '—'}</span>
+                      )
+                    case 'detail':
+                      return l.error ? (
+                        <TooltipProvider delayDuration={200}>
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span className="block cursor-help truncate text-micro text-status-danger">
+                                {l.statusCode ? `HTTP ${l.statusCode} ` : ''}
+                                {l.error}
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent className="max-w-sm break-all">
+                              <p className="text-caption">
+                                {l.statusCode ? `HTTP ${l.statusCode} · ` : ''}
+                                {l.error}
+                              </p>
+                            </TooltipContent>
+                          </Tooltip>
+                        </TooltipProvider>
+                      ) : (
+                        <span className="mono-id block truncate text-micro text-muted-foreground">→ {l.targetModel}</span>
+                      )
+                    default:
+                      return null
+                  }
+                }}
+              />
+            </div>
           )}
         </CardContent>
       </Card>

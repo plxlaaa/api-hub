@@ -9,3 +9,6 @@ db/setup-token.txt
 .env*.local
 .DS_Store
 tsconfig.tsbuildinfo
+
+# 前端截图（本地验证用，不入库）
+docs/screenshots/

@@ -2,35 +2,28 @@
 import { useRef, useState } from 'react'
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Activity, CheckCircle2, FileDown, KeyRound, Loader2, MessageSquare, RefreshCw, TrendingUp, Trophy, Upload, Wifi, WifiOff, XCircle } from 'lucide-react'
+import { BarChart3, FileDown, Loader2, RefreshCw, ScrollText, Store, Trophy, Upload } from 'lucide-react'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { ScrollArea } from '@/components/ui/scroll-area'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { EmptyState, SkeletonCards } from '@/components/feedback'
+import {
+  LatencyReadout,
+  Metric,
+  MetricGrid,
+  RatioBar,
+  SectionHeading,
+  StatusChip,
+  StatusDot,
+  StatusLabel,
+  fmtLatency,
+} from '@/components/metrics'
+import { channelStatus } from '@/lib/channel-ui'
 import { api, fmtTime } from '@/lib/api-client'
 import type { ApiTokenItem, Channel, ProbeLogItem, Stats } from '@/types'
 import { cn } from '@/lib/utils'
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from 'recharts'
-
-const STATUS_META: Record<string, { label: string; dot: string; badge: string }> = {
-  online: { label: '在线', dot: 'bg-emerald-500', badge: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300' },
-  offline: { label: '离线', dot: 'bg-red-500', badge: 'bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300' },
-  unknown: { label: '未知', dot: 'bg-amber-500', badge: 'bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300' },
-}
-
-function StatusBadge({ channel }: { channel: Channel }) {
-  const meta = STATUS_META[channel.enabled ? channel.status : 'unknown'] ?? STATUS_META.unknown
-  const label = channel.enabled ? meta.label : '已停用'
-  return (
-    <span className={cn('inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium', meta.badge)}>
-      <span className={cn('h-1.5 w-1.5 rounded-full', channel.enabled ? meta.dot : 'bg-zinc-400')} />
-      {label}
-    </span>
-  )
-}
 
 export function DashboardTab() {
   const qc = useQueryClient()
@@ -77,11 +70,18 @@ export function DashboardTab() {
   })
 
   const online = channels.filter((c) => c.enabled && c.status === 'online').length
-  const offline = channels.filter((c) => c.enabled && c.status === 'offline').length
+  /** 异常 = 探测离线 + 熔断摘除（两者都需要运维介入） */
+  const offline = channels.filter((c) => c.enabled && (c.status === 'offline' || c.autoDisabled)).length
   const disabled = channels.filter((c) => !c.enabled).length
-  const successRate = stats && stats.today.calls > 0
-    ? `${Math.round(((stats.today.calls - stats.today.fails) / stats.today.calls) * 100)}%`
-    : '—'
+  /** 成功率数值（0-100），无数据时为 null —— 供语义色分档与展示共用 */
+  const successRateValue =
+    stats && stats.today.calls > 0 ? ((stats.today.calls - stats.today.fails) / stats.today.calls) * 100 : null
+  const successRate = successRateValue == null ? '—' : `${Math.round(successRateValue)}%`
+
+  /** 探测延迟均值：仅统计有延迟样本的渠道 */
+  const latencySamples = channels.filter((c) => c.latencyMs != null)
+  const probeAvg =
+    latencySamples.length > 0 ? latencySamples.reduce((s, c) => s + (c.latencyMs ?? 0), 0) / latencySamples.length : null
 
   // 渠道横评 Top5：按累计调用量排序（数据来自 V23 渠道统计聚合）
   const topChannels = [...channels].filter((c) => (c.stats?.calls ?? 0) > 0).sort((a, b) => (b.stats?.calls ?? 0) - (a.stats?.calls ?? 0)).slice(0, 5)
@@ -132,12 +132,25 @@ export function DashboardTab() {
 
   return (
     <div className="space-y-6">
-      {/* 备份工具栏 */}
-      <div className="flex flex-wrap items-center justify-end gap-2">
-        <Button size="sm" variant="outline" onClick={() => exportConfig(false)}><FileDown className="h-4 w-4" /> 导出配置（不含密钥）</Button>
-        <Button size="sm" variant="outline" onClick={() => exportConfig(true)}><FileDown className="h-4 w-4" /> 导出完整备份（含密钥）</Button>
-        <Button size="sm" variant="outline" disabled={importConfig.isPending} onClick={() => importFileRef.current?.click()}>
-          {importConfig.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />} 导入备份
+      {/* 备份工具栏：窄屏横向滚动，避免按钮堆三行 */}
+      <div className="no-scrollbar -mx-4 flex items-center gap-1.5 overflow-x-auto px-4">
+        <Button size="sm" variant="outline" onClick={() => exportConfig(false)} className="shrink-0">
+          <FileDown className="h-4 w-4" />
+          导出配置（不含密钥）
+        </Button>
+        <Button size="sm" variant="outline" onClick={() => exportConfig(true)} className="shrink-0">
+          <FileDown className="h-4 w-4" />
+          导出完整备份（含密钥）
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          className="shrink-0"
+          disabled={importConfig.isPending}
+          onClick={() => importFileRef.current?.click()}
+        >
+          {importConfig.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
+          导入备份
         </Button>
         <input
           ref={importFileRef}
@@ -152,306 +165,453 @@ export function DashboardTab() {
         />
       </div>
 
-      {/* 渠道统计卡 */}
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <Card><CardContent className="flex items-center gap-3 pt-6">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10"><Activity className="h-5 w-5 text-primary" /></div>
-          <div><p className="text-xs text-muted-foreground">渠道总数</p><p className="tabular text-2xl font-semibold">{channels.length}</p></div>
-        </CardContent></Card>
-        <Card><CardContent className="flex items-center gap-3 pt-6">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-emerald-600/10"><Wifi className="h-5 w-5 text-emerald-600" /></div>
-          <div><p className="text-xs text-muted-foreground">在线</p><p className="tabular text-2xl font-semibold text-emerald-600">{online}</p></div>
-        </CardContent></Card>
-        <Card><CardContent className="flex items-center gap-3 pt-6">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-red-500/10"><WifiOff className="h-5 w-5 text-red-500" /></div>
-          <div><p className="text-xs text-muted-foreground">离线</p><p className="tabular text-2xl font-semibold text-red-500">{offline}</p></div>
-        </CardContent></Card>
-        <Card><CardContent className="flex items-center gap-3 pt-6">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-zinc-500/10"><XCircle className="h-5 w-5 text-zinc-400" /></div>
-          <div><p className="text-xs text-muted-foreground">已停用</p><p className="tabular text-2xl font-semibold text-zinc-400">{disabled}</p></div>
-        </CardContent></Card>
-      </div>
+      {/* ── 渠道健康：仪表读数区 ─────────────────────── */}
+      <section aria-label="渠道健康" className="panel p-4">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold tracking-tight">渠道健康</h2>
+          <div className="flex flex-wrap items-center gap-3 text-caption">
+            <StatusLabel kind="ok" live={offline === 0 && online > 0}>{online} 在线</StatusLabel>
+            {offline > 0 && <StatusLabel kind="danger">{offline} 异常</StatusLabel>}
+            {disabled > 0 && <StatusLabel kind="idle">{disabled} 停用</StatusLabel>}
+          </div>
+        </div>
+        <MetricGrid>
+          <Metric
+            label="渠道总数"
+            value={channels.length}
+            unit="个"
+            kind={channels.length === 0 ? 'idle' : 'info'}
+            hint={channels.length === 0 ? '尚未接入上游' : `已启用 ${channels.length - disabled} 个`}
+          />
+          <Metric label="在线" value={online} unit="个" kind={online > 0 ? 'ok' : 'idle'} hint="探测正常可转发" />
+          <Metric
+            label="异常"
+            value={offline}
+            unit="个"
+            kind={offline > 0 ? 'danger' : 'ok'}
+            hint={offline > 0 ? '需检查 Key 或上游' : '全部正常'}
+          />
+          <Metric label="已停用" value={disabled} unit="个" kind="idle" hint="不参与路由" />
+        </MetricGrid>
+      </section>
 
-      {/* 调用统计卡 */}
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
-        <Card><CardContent className="flex items-center gap-3 pt-6">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10"><MessageSquare className="h-5 w-5 text-primary" /></div>
-          <div><p className="text-xs text-muted-foreground">今日调用</p><p className="tabular text-2xl font-semibold">{stats?.today.calls ?? 0}</p></div>
-        </CardContent></Card>
-        <Card><CardContent className="flex items-center gap-3 pt-6">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-red-500/10"><XCircle className="h-5 w-5 text-red-500" /></div>
-          <div><p className="text-xs text-muted-foreground">今日失败</p><p className="tabular text-2xl font-semibold text-red-500">{stats?.today.fails ?? 0}</p></div>
-        </CardContent></Card>
-        <Card><CardContent className="flex items-center gap-3 pt-6">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10"><TrendingUp className="h-5 w-5 text-primary" /></div>
-          <div><p className="text-xs text-muted-foreground">累计调用</p><p className="tabular text-2xl font-semibold">{stats?.total.calls ?? 0}</p></div>
-        </CardContent></Card>
-        <Card><CardContent className="flex items-center gap-3 pt-6">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-emerald-600/10"><CheckCircle2 className="h-5 w-5 text-emerald-600" /></div>
-          <div><p className="text-xs text-muted-foreground">今日成功率</p><p className="tabular text-2xl font-semibold text-emerald-600">{successRate}</p></div>
-        </CardContent></Card>
-      </div>
-
-      {/* 密钥配额汇总 */}
-      {tokens.length > 0 && (
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between space-y-0">
-            <CardTitle className="flex items-center gap-2 text-base"><KeyRound className="h-4 w-4" /> 密钥配额汇总</CardTitle>
-            <span className="text-xs text-muted-foreground">
-              共 {tokens.filter((t) => t.enabled).length} 个启用密钥
+      {/* ── 调用统计：仪表读数区 ─────────────────────── */}
+      <section aria-label="调用统计" className="panel p-4">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold tracking-tight">调用统计</h2>
+          <span className="text-caption text-muted-foreground">
+            今日成功率{' '}
+            <span
+              className={cn(
+                'tabular font-medium',
+                successRateValue == null && 'text-status-idle',
+                successRateValue != null && successRateValue >= 95 && 'text-status-ok',
+                successRateValue != null && successRateValue >= 80 && successRateValue < 95 && 'text-status-info',
+                successRateValue != null && successRateValue >= 50 && successRateValue < 80 && 'text-status-warn',
+                successRateValue != null && successRateValue < 50 && 'text-status-danger'
+              )}
+            >
+              {successRate}
             </span>
-          </CardHeader>
-          <CardContent>
-            <div className="space-y-3">
-              {tokens.map((t) => {
-                const pct = t.quotaLimit ? Math.min(100, Math.round((t.quotaUsed / t.quotaLimit) * 100)) : 0
-                const exhausted = t.quotaLimit !== null && t.quotaUsed >= t.quotaLimit
-                return (
-                  <div key={t.id} className="flex items-center gap-3">
-                    <div className="flex w-44 min-w-0 items-center gap-2">
-                      <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', t.enabled ? 'bg-emerald-500' : 'bg-zinc-400')} />
-                      <span className="truncate text-sm font-medium" title={t.name}>{t.name}</span>
-                      {!t.enabled && <Badge variant="outline" className="shrink-0 px-1 py-0 text-[10px] text-zinc-400">停用</Badge>}
-                    </div>
-                    {t.quotaLimit !== null ? (
-                      <div className="flex flex-1 items-center gap-2">
-                        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
-                          <div
-                            className={cn('h-full rounded-full', exhausted ? 'bg-red-500' : pct > 80 ? 'bg-amber-500' : 'bg-emerald-500')}
-                            style={{ width: `${pct}%` }}
-                          />
-                        </div>
-                        <span className={cn('w-24 shrink-0 text-right text-xs tabular-nums', exhausted ? 'font-medium text-red-500' : 'text-muted-foreground')}>
-                          {t.quotaUsed}/{t.quotaLimit}（{pct}%）
-                        </span>
-                      </div>
-                    ) : (
-                      <div className="flex flex-1 items-center justify-between">
-                        <span className="text-xs text-muted-foreground">不限量</span>
-                        <span className="text-xs tabular-nums text-muted-foreground">已用 {t.quotaUsed} 次</span>
-                      </div>
+          </span>
+        </div>
+        <MetricGrid>
+          <Metric
+            label="今日调用"
+            value={(stats?.today.calls ?? 0).toLocaleString()}
+            unit="次"
+            kind="info"
+            hint={`失败 ${stats?.today.fails ?? 0} 次`}
+          />
+          <Metric
+            label="今日失败"
+            value={(stats?.today.fails ?? 0).toLocaleString()}
+            unit="次"
+            kind={(stats?.today.fails ?? 0) > 0 ? 'danger' : 'ok'}
+            hint={(stats?.today.fails ?? 0) > 0 ? '检查下方日志定位原因' : '无失败请求'}
+          />
+          <Metric
+            label="累计调用"
+            value={(stats?.total.calls ?? 0).toLocaleString()}
+            unit="次"
+            kind="idle"
+            hint="自网关启用以来"
+          />
+          <Metric
+            label="探测延迟"
+            value={probeAvg == null ? '—' : (probeAvg / 1000).toFixed(2)}
+            unit={probeAvg == null ? undefined : 's'}
+            kind={probeAvg == null ? 'idle' : probeAvg < 1500 ? 'ok' : probeAvg < 4000 ? 'info' : 'warn'}
+            hint={probeAvg == null ? '暂无探测样本' : `${channels.filter((c) => c.latencyMs != null).length} 个渠道均值`}
+          />
+        </MetricGrid>
+      </section>
+
+      {/* ── 密钥配额 ─────────────────────────────────── */}
+      {tokens.length > 0 && (
+        <section aria-label="密钥配额" className="panel p-4">
+          <SectionHeading
+            title="密钥配额"
+            description={`共 ${tokens.filter((t) => t.enabled).length} 个启用密钥`}
+          />
+          <ul className="mt-3.5 flex flex-col gap-1.5">
+            {tokens.map((t) => {
+              const hasLimit = t.quotaLimit !== null
+              const pct = hasLimit ? Math.min(100, Math.round((t.quotaUsed / t.quotaLimit!) * 100)) : null
+              const exhausted = hasLimit && t.quotaUsed >= t.quotaLimit!
+              return (
+                <li
+                  key={t.id}
+                  className="flex flex-col gap-1.5 rounded-lg border border-hairline px-3 py-2.5 sm:flex-row sm:items-center sm:gap-3"
+                >
+                  <div className="flex min-w-0 items-center gap-2 sm:w-44 sm:shrink-0">
+                    <StatusDot kind={t.enabled ? 'ok' : 'idle'} />
+                    <span className="truncate text-caption font-medium" title={t.name}>
+                      {t.name}
+                    </span>
+                    {!t.enabled && (
+                      <Badge variant="outline" className="shrink-0 px-1 py-0 text-micro text-status-idle">
+                        停用
+                      </Badge>
                     )}
                   </div>
-                )
-              })}
-            </div>
-          </CardContent>
-        </Card>
+                  {pct != null ? (
+                    <>
+                      <RatioBar
+                        value={pct}
+                        kind={exhausted ? 'danger' : pct > 80 ? 'warn' : 'ok'}
+                        className="min-w-0 flex-1"
+                      />
+                      <span
+                        className={cn(
+                          'tabular shrink-0 text-micro sm:w-28 sm:text-right',
+                          exhausted ? 'font-medium text-status-danger' : 'text-muted-foreground'
+                        )}
+                      >
+                        {t.quotaUsed.toLocaleString()} / {t.quotaLimit!.toLocaleString()}
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-micro text-muted-foreground sm:flex-1">不限量</span>
+                      <span className="tabular shrink-0 text-micro text-muted-foreground">
+                        已用 {t.quotaUsed.toLocaleString()} 次
+                      </span>
+                    </>
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+        </section>
       )}
 
-      {/* 调用趋势：24h / 7d 切换 */}
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0">
-          <CardTitle className="text-base">{trendMode === '24h' ? '近 24 小时调用趋势' : '近 7 天调用趋势'}</CardTitle>
-          <div className="flex rounded-md border text-xs">
-            {(['24h', '7d'] as const).map((m) => (
-              <button
-                key={m}
-                className={cn('px-2.5 py-1', trendMode === m ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground')}
-                onClick={() => setTrendMode(m)}
-              >
-                {m === '24h' ? '24 小时' : '7 天'}
-              </button>
-            ))}
-          </div>
-        </CardHeader>
-        <CardContent>
+      {/* ── 调用趋势 ─────────────────────────────────── */}
+      <section aria-label="调用趋势" className="panel p-4">
+        <SectionHeading
+          title={trendMode === '24h' ? '近 24 小时调用趋势' : '近 7 天调用趋势'}
+          description="调用与失败的逐时/逐日分布"
+          action={
+            <div className="inline-flex rounded-md border p-0.5" role="group" aria-label="时间范围">
+              {(['24h', '7d'] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  aria-pressed={trendMode === m}
+                  className={cn(
+                    'min-h-7 rounded-[5px] px-2.5 text-caption font-medium',
+                    trendMode === m
+                      ? 'bg-primary text-primary-foreground'
+                      : 'text-muted-foreground hover:text-foreground'
+                  )}
+                  onClick={() => setTrendMode(m)}
+                >
+                  {m === '24h' ? '24 小时' : '7 天'}
+                </button>
+              ))}
+            </div>
+          }
+        />
+        <div className="mt-4">
           {trendMode === '24h' ? (
             !stats || stats.total.calls === 0 ? (
-              <div className="flex h-40 items-center justify-center text-sm text-muted-foreground">
-                暂无调用数据 —— 用统一 Key 发起对话后，这里会出现趋势图
-              </div>
+              <EmptyState
+                compact
+                icon={BarChart3}
+                title="暂无调用数据"
+                description="用统一 Key 或在「对话测试」发一条消息，这里就会出现趋势图。"
+                action={
+                  <Button size="sm" variant="outline" asChild>
+                    <a href="?tab=chat">去对话测试</a>
+                  </Button>
+                }
+              />
             ) : (
               <div className="h-64">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={stats.hourly} margin={{ top: 4, right: 8, bottom: 0, left: -20 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="currentColor" opacity={0.1} />
+                    <CartesianGrid strokeDasharray="3 3" stroke="currentColor" opacity={0.1} vertical={false} />
                     <XAxis dataKey="hour" tick={{ fontSize: 11 }} interval={3} stroke="currentColor" opacity={0.5} />
                     <YAxis allowDecimals={false} tick={{ fontSize: 11 }} stroke="currentColor" opacity={0.5} />
                     <ChartTooltip
                       contentStyle={{ fontSize: 12, borderRadius: 8 }}
+                      cursor={{ fill: 'var(--muted)' }}
                       formatter={(value: number | string, name: string) => [value, name === 'calls' ? '调用' : '失败']}
                     />
                     <Legend formatter={(v: string) => (v === 'calls' ? '调用' : '失败')} wrapperStyle={{ fontSize: 12 }} />
-                    <Bar dataKey="calls" fill="#10b981" radius={[3, 3, 0, 0]} />
-                    <Bar dataKey="fails" fill="#ef4444" radius={[3, 3, 0, 0]} />
+                    <Bar dataKey="calls" fill="var(--chart-2)" radius={[3, 3, 0, 0]} />
+                    <Bar dataKey="fails" fill="var(--status-danger)" radius={[3, 3, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
             )
           ) : (
             !stats?.daily7 ? (
-              <div className="flex h-40 items-center justify-center text-sm text-muted-foreground">暂无数据</div>
+              <EmptyState compact icon={BarChart3} title="暂无 7 天数据" description="连续运行几天后这里会显示每日调用与 Token 消耗。" />
             ) : (
               <div className="h-64">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={stats.daily7} margin={{ top: 4, right: 8, bottom: 0, left: -20 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="currentColor" opacity={0.1} />
+                    <CartesianGrid strokeDasharray="3 3" stroke="currentColor" opacity={0.1} vertical={false} />
                     <XAxis dataKey="date" tick={{ fontSize: 11 }} stroke="currentColor" opacity={0.5} />
                     <YAxis allowDecimals={false} tick={{ fontSize: 11 }} stroke="currentColor" opacity={0.5} />
                     <ChartTooltip
                       contentStyle={{ fontSize: 12, borderRadius: 8 }}
-                      formatter={(value: number | string, name: string) => [name === 'tokens' ? `${Number(value).toLocaleString()} tok` : value, name === 'calls' ? '调用' : name === 'fails' ? '失败' : 'Token']}
+                      cursor={{ fill: 'var(--muted)' }}
+                      formatter={(value: number | string, name: string) => [
+                        name === 'tokens' ? `${Number(value).toLocaleString()} tok` : value,
+                        name === 'calls' ? '调用' : name === 'fails' ? '失败' : 'Token',
+                      ]}
                     />
-                    <Legend formatter={(v: string) => (v === 'calls' ? '调用' : v === 'fails' ? '失败' : 'Token')} wrapperStyle={{ fontSize: 12 }} />
-                    <Bar dataKey="calls" fill="#10b981" radius={[3, 3, 0, 0]} />
-                    <Bar dataKey="fails" fill="#ef4444" radius={[3, 3, 0, 0]} />
-                    <Bar dataKey="tokens" fill="#6366f1" radius={[3, 3, 0, 0]} />
+                    <Legend
+                      formatter={(v: string) => (v === 'calls' ? '调用' : v === 'fails' ? '失败' : 'Token')}
+                      wrapperStyle={{ fontSize: 12 }}
+                    />
+                    <Bar dataKey="calls" fill="var(--chart-2)" radius={[3, 3, 0, 0]} />
+                    <Bar dataKey="fails" fill="var(--status-danger)" radius={[3, 3, 0, 0]} />
+                    <Bar dataKey="tokens" fill="var(--chart-3)" radius={[3, 3, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
             )
           )}
-        </CardContent>
-      </Card>
+        </div>
+      </section>
 
-      {/* 渠道横评 Top5 */}
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0">
-          <CardTitle className="flex items-center gap-2 text-base"><Trophy className="h-4 w-4 text-amber-500" /> 渠道横评 Top5</CardTitle>
-          <span className="text-xs text-muted-foreground">按累计调用量排序</span>
-        </CardHeader>
-        <CardContent>
+      {/* ── 渠道横评 Top5 ─────────────────────────────── */}
+      <section aria-label="渠道横评" className="panel p-4">
+        <SectionHeading title="渠道横评 Top5" description="按累计调用量排序，条形长度为成功率" />
+        <div className="mt-3.5">
           {topChannels.length === 0 ? (
-            <div className="flex h-16 items-center justify-center text-sm text-muted-foreground">
-              还没有调用记录 —— 发起调用后这里会出现渠道排行
-            </div>
+            <EmptyState
+              compact
+              icon={Trophy}
+              title="还没有调用记录"
+              description="发起调用后，这里会按累计调用量排出使用最多的 5 个渠道及其成功率。"
+            />
           ) : (
-            <div className="space-y-2.5">
+            <ol className="flex flex-col gap-1.5">
               {topChannels.map((c, i) => {
                 const s = c.stats!
                 const rate = Math.round((s.ok / s.calls) * 100)
                 return (
-                  <div key={c.id} className="flex items-center gap-3">
-                    <span className={cn('inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-bold', i === 0 ? 'bg-amber-500 text-white' : 'bg-muted text-muted-foreground')}>{i + 1}</span>
-                    <span className="w-32 min-w-0 truncate text-sm font-medium" title={c.name}>{c.name}</span>
-                    <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
-                      <div className={cn('h-full rounded-full', rate >= 95 ? 'bg-emerald-500' : rate >= 80 ? 'bg-amber-500' : 'bg-red-500')} style={{ width: `${Math.max(4, rate)}%` }} />
-                    </div>
-                    <span className="w-28 shrink-0 text-right text-xs tabular-nums text-muted-foreground">
-                      {s.calls} 次 · {rate}%{s.avgLatencyMs != null ? ` · ${(s.avgLatencyMs / 1000).toFixed(1)}s` : ''}
+                  <li key={c.id} className="flex items-center gap-2.5 sm:gap-3">
+                    <span
+                      className={cn(
+                        'tabular inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-micro font-semibold',
+                        i === 0 ? 'bg-status-warn/15 text-status-warn' : 'bg-muted text-muted-foreground'
+                      )}
+                    >
+                      {i + 1}
                     </span>
+                    <span className="w-24 min-w-0 truncate text-caption font-medium sm:w-32" title={c.name}>
+                      {c.name}
+                    </span>
+                    <RatioBar
+                      value={rate}
+                      kind={rate >= 95 ? 'ok' : rate >= 80 ? 'warn' : 'danger'}
+                      className="min-w-0 flex-1"
+                    />
+                    <span className="tabular w-24 shrink-0 text-right text-micro text-muted-foreground sm:w-32">
+                      {s.calls.toLocaleString()} 次 · {fmtLatency(s.avgLatencyMs)}
+                    </span>
+                  </li>
+                )
+              })}
+            </ol>
+          )}
+        </div>
+      </section>
+
+      {/* ── 渠道实时状态 ─────────────────────────────── */}
+      <section aria-label="渠道实时状态" className="panel p-4">
+        <SectionHeading
+          title="渠道实时状态"
+          description="每个渠道的探测结果与今日用量"
+          action={
+            <Button size="sm" variant="outline" onClick={() => probeAll.mutate()} disabled={probeAll.isPending}>
+              {probeAll.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+              全部检测
+            </Button>
+          }
+        />
+        <div className="mt-3.5">
+          {isLoading ? (
+            <SkeletonCards count={3} />
+          ) : channels.length === 0 ? (
+            <EmptyState
+              compact
+              icon={Store}
+              title="还没有渠道"
+              description="渠道是网关的上游。先到「渠道管理」接入你的公益站 API，这里就会显示每个渠道的健康状况。"
+              action={
+                <Button size="sm" asChild>
+                  <a href="?tab=channels">去添加渠道</a>
+                </Button>
+              }
+            />
+          ) : (
+            <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2 xl:grid-cols-3">
+              {channels.map((c) => {
+                const st = channelStatus(c)
+                const usage = stats?.channelUsage?.[c.name]
+                return (
+                  <div key={c.id} className="flex flex-col gap-2 rounded-lg border border-hairline p-3 transition-colors hover:bg-muted/40">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <p className="truncate text-caption font-medium" title={c.name}>
+                          {c.name}
+                        </p>
+                        <p className="mono-id truncate text-muted-foreground" title={c.baseUrl}>
+                          {c.baseUrl}
+                        </p>
+                      </div>
+                      <StatusChip kind={st.kind} title={st.hint} className="shrink-0">
+                        {st.label}
+                      </StatusChip>
+                    </div>
+
+                    <dl className="flex items-center justify-between gap-2 text-micro">
+                      <div className="flex items-baseline gap-1">
+                        <dt className="text-muted-foreground">延迟</dt>
+                        <dd>
+                          <LatencyReadout ms={c.latencyMs} showUnit={false} />
+                        </dd>
+                      </div>
+                      <div className="min-w-0 truncate text-right text-muted-foreground">
+                        <dt className="sr-only">最近探测</dt>
+                        <dd className="truncate">{fmtTime(c.lastCheckAt)}</dd>
+                      </div>
+                    </dl>
+
+                    {usage && (
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <Badge variant="secondary" className="h-5 px-1.5 text-micro">
+                          24h <span className="tabular">{usage.calls}</span> 次
+                        </Badge>
+                        {usage.fails > 0 && (
+                          <Badge variant="outline" className="h-5 border-status-danger/40 bg-status-danger-soft px-1.5 text-micro text-status-danger">
+                            失败 <span className="tabular">{usage.fails}</span>
+                          </Badge>
+                        )}
+                        {usage.avgLatencyMs != null && (
+                          <span className="tabular text-micro text-muted-foreground">
+                            均 {Math.round(usage.avgLatencyMs)}ms
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    {c.lastError && (
+                      <TooltipProvider delayDuration={200}>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <p className="truncate text-micro text-status-danger">
+                              <span aria-hidden="true">⚠ </span>
+                              {c.lastError}
+                            </p>
+                          </TooltipTrigger>
+                          <TooltipContent className="max-w-xs break-all">
+                            <p className="text-caption">{c.lastError}</p>
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    )}
+
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="mt-auto min-h-8 w-full"
+                      onClick={() => probeOne.mutate(c.id)}
+                      disabled={probeOne.isPending}
+                    >
+                      {probeOne.isPending && probeOne.variables === c.id ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <>
+                          <RefreshCw className="h-3 w-3" />检测
+                        </>
+                      )}
+                    </Button>
                   </div>
                 )
               })}
             </div>
           )}
-        </CardContent>
-      </Card>
+        </div>
+      </section>
 
-      {/* 渠道状态 */}
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0">
-          <CardTitle className="text-base">渠道实时状态</CardTitle>
-          <Button size="sm" variant="outline" onClick={() => probeAll.mutate()} disabled={probeAll.isPending}>
-            {probeAll.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-            全部检测
-          </Button>
-        </CardHeader>
-        <CardContent>
-          {isLoading ? (
-            <div className="flex h-24 items-center justify-center text-muted-foreground"><Loader2 className="mr-2 h-4 w-4 animate-spin" />加载中…</div>
-          ) : channels.length === 0 ? (
-            <div className="flex h-24 items-center justify-center text-sm text-muted-foreground">
-              还没有渠道，请到「渠道管理」添加你的公益站 API
-            </div>
+      {/* ── 探测日志 ─────────────────────────────────── */}
+      <section aria-label="最近探测记录" className="panel p-4">
+        <SectionHeading title="最近探测记录" description="定时任务对每个渠道的健康检查" />
+        <div className="mt-3.5">
+          {logs.length === 0 ? (
+            <EmptyState
+              compact
+              icon={ScrollText}
+              title="暂无探测记录"
+              description="网关会定时探测所有启用渠道。点上方「全部检测」可立即触发一次。"
+            />
           ) : (
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
-              {channels.map((c) => (
-                <div key={c.id} className="rounded-lg border p-4 space-y-2 transition-colors hover:bg-accent/40">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="min-w-0">
-                      <p className="truncate font-medium">{c.name}</p>
-                      <p className="truncate text-xs text-muted-foreground">{c.baseUrl}</p>
-                    </div>
-                    <StatusBadge channel={c} />
-                  </div>
-                  <div className="flex items-center justify-between text-xs text-muted-foreground">
-                    <span>延迟：{c.latencyMs != null ? `${c.latencyMs} ms` : '—'}</span>
-                    <span>检查于 {fmtTime(c.lastCheckAt)}</span>
-                  </div>
-                  {stats?.channelUsage?.[c.name] && (
-                    <div className="flex items-center gap-2 text-xs">
-                      <Badge variant="secondary" className="h-5 px-1.5 text-[11px]">
-                        24h {stats.channelUsage[c.name].calls} 次
-                      </Badge>
-                      {stats.channelUsage[c.name].fails > 0 && (
-                        <Badge variant="destructive" className="h-5 px-1.5 text-[11px]">
-                          失败 {stats.channelUsage[c.name].fails}
-                        </Badge>
-                      )}
-                      {stats.channelUsage[c.name].avgLatencyMs != null && (
-                        <span className="text-muted-foreground">均 {stats.channelUsage[c.name].avgLatencyMs}ms</span>
-                      )}
-                    </div>
-                  )}
-                  {c.lastError && (
-                    <TooltipProvider delayDuration={200}>
-                      <Tooltip>
-                        <TooltipTrigger asChild>
-                          <p className="truncate text-xs text-destructive cursor-help">⚠ {c.lastError}</p>
-                        </TooltipTrigger>
-                        <TooltipContent className="max-w-xs break-all"><p className="text-xs">{c.lastError}</p></TooltipContent>
-                      </Tooltip>
-                    </TooltipProvider>
-                  )}
-                  <Button
-                    size="sm" variant="secondary" className="h-7 w-full"
-                    onClick={() => probeOne.mutate(c.id)} disabled={probeOne.isPending}
-                  >
-                    {probeOne.isPending && probeOne.variables === c.id
-                      ? <Loader2 className="h-3 w-3 animate-spin" />
-                      : <><RefreshCw className="h-3 w-3" />检测</>}
-                  </Button>
-                </div>
-              ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
-
-      {/* 探测日志 */}
-      <Card>
-        <CardHeader><CardTitle className="text-base">最近探测记录</CardTitle></CardHeader>
-        <CardContent>
-          <ScrollArea className="max-h-80">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>时间</TableHead>
-                  <TableHead>渠道</TableHead>
-                  <TableHead>结果</TableHead>
-                  <TableHead>延迟</TableHead>
-                  <TableHead className="hidden md:table-cell">详情</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {logs.length === 0 ? (
-                  <TableRow><TableCell colSpan={5} className="h-16 text-center text-muted-foreground">暂无记录</TableCell></TableRow>
-                ) : (
-                  logs.map((l) => (
-                    <TableRow key={l.id}>
-                      <TableCell className="whitespace-nowrap text-xs">{fmtTime(l.createdAt)}</TableCell>
-                      <TableCell className="text-sm">{l.channelName}</TableCell>
-                      <TableCell>
-                        {l.ok ? (
-                          <Badge variant="outline" className="gap-1 border-emerald-300 text-emerald-600"><CheckCircle2 className="h-3 w-3" />成功</Badge>
-                        ) : (
-                          <Badge variant="outline" className="gap-1 border-red-300 text-red-600"><XCircle className="h-3 w-3" />失败</Badge>
+            <ul className="flex max-h-80 flex-col gap-1.5 overflow-y-auto pr-1">
+              {logs.map((l) => (
+                <li
+                  key={l.id}
+                  className="flex items-center gap-2.5 rounded-lg border border-hairline px-2.5 py-2 text-caption"
+                >
+                  <StatusDot kind={l.ok ? 'ok' : 'danger'} />
+                  <span className="min-w-0 flex-1">
+                    <span className="flex items-baseline gap-1.5">
+                      <span className="truncate font-medium">{l.channelName}</span>
+                      <span
+                        className={cn(
+                          'shrink-0 text-micro font-medium',
+                          l.ok ? 'text-status-ok' : 'text-status-danger'
                         )}
-                      </TableCell>
-                      <TableCell className="text-xs">{l.latencyMs != null ? `${l.latencyMs} ms` : '—'}</TableCell>
-                      <TableCell className="hidden max-w-64 truncate text-xs text-muted-foreground md:table-cell">
+                      >
+                        {l.ok ? '成功' : '失败'}
+                      </span>
+                    </span>
+                    {(l.statusCode || l.error) && (
+                      <span
+                        className={cn(
+                          'block truncate text-micro',
+                          l.ok ? 'text-muted-foreground' : 'text-status-danger/85'
+                        )}
+                        title={l.error ?? undefined}
+                      >
                         {l.statusCode ? `HTTP ${l.statusCode}` : ''} {l.error || ''}
-                      </TableCell>
-                    </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
-          </ScrollArea>
-        </CardContent>
-      </Card>
+                      </span>
+                    )}
+                  </span>
+                  <LatencyReadout ms={l.latencyMs} className="shrink-0 text-caption" />
+                  <span className="tabular shrink-0 text-micro text-muted-foreground">{fmtTime(l.createdAt)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </section>
     </div>
   )
 }

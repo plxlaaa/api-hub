@@ -2,7 +2,7 @@
 
 import { useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { CloudDownload, ClipboardPaste, FileDown, Loader2, MessageSquare, Pencil, Plus, Trash2, Upload, ZapOff } from 'lucide-react'
+import { CloudDownload, ClipboardPaste, FileDown, Loader2, MessageSquare, Pencil, Plus, Store, Trash2, Upload, ZapOff } from 'lucide-react'
 import { toast } from 'sonner'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import {
@@ -17,9 +17,12 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Textarea } from '@/components/ui/textarea'
-import { api, fmtTokens } from '@/lib/api-client'
+import { EmptyState, SkeletonRows } from '@/components/feedback'
+import { KeyValue, LatencyReadout, StatusDot, Truncate, fmtLatency } from '@/components/metrics'
+import { ResponsiveList, Toolbar } from '@/components/responsive-list'
+import { channelStatus, formatLabel, successKind } from '@/lib/channel-ui'
+import { api, fmtTime, fmtTokens } from '@/lib/api-client'
 import { cn } from '@/lib/utils'
 import type { Channel, ChatTestResult, ExportedConfig } from '@/types'
 
@@ -224,40 +227,57 @@ export function ChannelsTab() {
   return (
     <div className="space-y-4">
       <Card>
-        <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-2 space-y-0">
-          <CardTitle className="text-base">渠道管理（{channels.length}）</CardTitle>
-          <div className="flex gap-2">
-            <Button size="sm" variant="outline" onClick={exportConfig} title="导出全部配置（含 Key）">
-              <FileDown className="h-4 w-4" /> 导出
-            </Button>
-            <Button size="sm" variant="outline" onClick={() => setImportOpen(true)}>
-              <Upload className="h-4 w-4" /> 导入
-            </Button>
-            <Button size="sm" variant="outline" onClick={() => setBatchOpen(true)} title="粘贴多行文本批量建渠道">
-              <ClipboardPaste className="h-4 w-4" /> 批量粘贴
-            </Button>
-            <Button size="sm" onClick={openCreate}><Plus className="h-4 w-4" />添加渠道</Button>
+        <CardHeader className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <CardTitle className="text-base">
+              <span className="hidden lg:inline">渠道管理</span>
+              <span className="lg:hidden">共 </span>
+              <span className="tabular text-caption font-normal text-muted-foreground">{channels.length}</span>
+              <span className="lg:hidden text-caption font-normal text-muted-foreground">个渠道</span>
+            </CardTitle>
+            <span className="text-caption text-muted-foreground">
+              在线 <span className="tabular text-status-ok">{channels.filter((c) => c.status === 'online' && c.enabled).length}</span>
+              <span className="mx-1 text-muted-foreground/50">/</span>
+              <span className="tabular">{channels.filter((c) => c.enabled).length}</span>
+            </span>
           </div>
+          <Toolbar>
+            <Button size="sm" onClick={openCreate} className="shrink-0">
+              <Plus className="h-4 w-4" />添加渠道
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => setBatchOpen(true)} title="粘贴多行文本批量建渠道" className="shrink-0">
+              <ClipboardPaste className="h-4 w-4" />
+              <span className="hidden sm:inline">批量粘贴</span>
+            </Button>
+            <Button size="sm" variant="outline" onClick={exportConfig} title="导出全部配置（含 Key）" className="shrink-0">
+              <FileDown className="h-4 w-4" />
+              <span className="hidden sm:inline">导出</span>
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => setImportOpen(true)} className="shrink-0">
+              <Upload className="h-4 w-4" />
+              <span className="hidden sm:inline">导入</span>
+            </Button>
+          </Toolbar>
         </CardHeader>
         <CardContent className="space-y-3">
           {/* 熔断器设置条 */}
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md border border-dashed px-3 py-2.5">
             <div className="flex items-center gap-2">
-              <ZapOff className={'h-4 w-4 ' + (breaker?.circuitBreaker ? 'text-amber-500' : 'text-muted-foreground')} />
+              <ZapOff className={cn('h-4 w-4', breaker?.circuitBreaker ? 'text-status-warn' : 'text-muted-foreground')} />
               <span className="text-sm font-medium">自动熔断</span>
               <Switch
                 checked={breaker?.circuitBreaker ?? true}
                 onCheckedChange={(v) => saveBreaker.mutate({ circuitBreaker: v })}
               />
             </div>
-            <div className={'flex items-center gap-2 text-xs text-muted-foreground ' + (breaker?.circuitBreaker ? '' : 'opacity-40')}>
-              <span>连续失败</span>
+            <div className={cn('flex min-w-0 flex-1 items-center gap-2 text-caption text-muted-foreground sm:flex-none', !breaker?.circuitBreaker && 'opacity-40')}>
+              <span className="shrink-0 whitespace-nowrap">连续失败</span>
               <Input
                 type="number"
                 min={1}
                 defaultValue={breaker?.cbThreshold ?? 3}
                 key={breaker?.cbThreshold}
-                className="h-7 w-16 text-center text-xs"
+                className="h-8 w-14 shrink-0 text-center text-xs"
                 disabled={!breaker?.circuitBreaker}
                 onBlur={(e) => {
                   const n = Math.max(1, Math.floor(Number(e.target.value) || 3))
@@ -265,111 +285,262 @@ export function ChannelsTab() {
                   if (n !== breaker?.cbThreshold) saveBreaker.mutate({ cbThreshold: n })
                 }}
               />
-              <span>次 → 自动摘除渠道，恢复后自动加回</span>
+              <span className="hidden sm:inline">次 → 自动摘除渠道，恢复后自动加回</span>
             </div>
             {channels.some((c) => c.autoDisabled) && (
-              <span className="ml-auto rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-medium text-red-700 dark:bg-red-950 dark:text-red-300">
+              <span className="ml-auto rounded-full bg-status-danger-soft px-2.5 py-0.5 text-xs font-medium text-status-danger">
                 {channels.filter((c) => c.autoDisabled).length} 个渠道熔断中
               </span>
             )}
           </div>
-          <div className="max-h-[32rem] overflow-y-auto rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>名称</TableHead>
-                  <TableHead className="hidden md:table-cell">Base URL</TableHead>
-                  <TableHead>模型数</TableHead>
-                  <TableHead className="hidden lg:table-cell">用量横评</TableHead>
-                  <TableHead>状态</TableHead>
-                  <TableHead>启用</TableHead>
-                  <TableHead className="text-right">操作</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {isLoading ? (
-                  <TableRow><TableCell colSpan={7} className="h-16 text-center"><Loader2 className="mx-auto h-4 w-4 animate-spin" /></TableCell></TableRow>
-                ) : channels.length === 0 ? (
-                  <TableRow><TableCell colSpan={7} className="h-16 text-center text-muted-foreground">暂无渠道，点击右上角「添加渠道」接入你的第一个公益站</TableCell></TableRow>
-                ) : (
-                  channels.map((c) => (
-                    <TableRow key={c.id}>
-                      <TableCell>
-                        <div className="flex items-center gap-1.5">
-                          <p className="font-medium">{c.name}</p>
-                          {c.apiFormat === 'anthropic' && (
-                            <Badge variant="outline" className="border-orange-300 text-[10px] font-normal text-orange-600 dark:border-orange-700 dark:text-orange-400" title="Anthropic / Claude 原生格式渠道，网关自动双向转换">
-                              Claude 格式
-                            </Badge>
-                          )}
-                        </div>
-                        {c.remark && <p className="text-xs text-muted-foreground">{c.remark}</p>}
-                      </TableCell>
-                      <TableCell className="hidden max-w-56 truncate text-xs text-muted-foreground md:table-cell">{c.baseUrl}</TableCell>
-                      <TableCell className="text-sm">{c.models.length}</TableCell>
-                      <TableCell className="hidden lg:table-cell">
-                        {(() => {
-                          const s = c.stats
-                          if (!s || s.calls === 0) return <span className="text-xs text-muted-foreground">未调用</span>
-                          const rate = Math.round((s.ok / s.calls) * 100)
-                          return (
-                            <div className="text-xs leading-tight" title={`累计 ${s.calls} 次调用 · 成功 ${s.ok} 次${s.tokens ? ` · 消耗 ${s.tokens.toLocaleString()} tokens` : ''}${c.uptime24h != null ? ` · 近24h探测可用率 ${c.uptime24h}%` : ''}`}>
-                              <p className={cn('tabular-nums', rate < 80 ? 'text-amber-600' : 'text-emerald-600')}>
-                                {s.calls} 次 · {rate}%
-                              </p>
-                              <p className="text-muted-foreground">
-                                {s.avgLatencyMs != null ? `均值 ${(s.avgLatencyMs / 1000).toFixed(1)}s` : '延迟 —'}
-                                {s.tokens > 0 ? ` · ${fmtTokens(s.tokens)}` : ''}
-                                {c.uptime24h != null ? ` · 探测 ${c.uptime24h}%` : ''}
-                              </p>
-                            </div>
-                          )
-                        })()}
-                      </TableCell>
-                      <TableCell>
-                        {c.autoDisabled ? (
-                          <span
-                            className="inline-flex items-center gap-1.5 text-xs font-medium text-red-600 dark:text-red-400"
-                            title={`连续失败 ${c.failStreak} 次，已自动摘除；探测恢复后自动加回`}
+
+          {/* 渠道列表：桌面表格 / 窄屏卡片 */}
+          {isLoading ? (
+            <SkeletonRows rows={4} />
+          ) : channels.length === 0 ? (
+            <EmptyState
+              icon={Store}
+              title="还没有接入任何渠道"
+              description="渠道是网关的「上游」。填入公益站的 Base URL 与 API Key，网关就能聚合它们、统一成一个地址。"
+              action={
+                <Button size="sm" onClick={openCreate}>
+                  <Plus className="h-4 w-4" />添加第一个渠道
+                </Button>
+              }
+            />
+          ) : (
+            <div className="max-h-[36rem] overflow-y-auto">
+              <ResponsiveList
+                keyOf={(c) => (c._raw as Channel).id}
+                className="space-y-1.5"
+                columns={[
+                  { key: 'name', header: '名称' },
+                  { key: 'baseUrl', header: 'Base URL', className: 'max-w-56' },
+                  { key: 'models', header: '模型', align: 'right', className: 'w-16' },
+                  { key: 'usage', header: '用量横评', className: 'hidden lg:table-cell' },
+                  { key: 'status', header: '状态' },
+                  { key: 'enabled', header: '启用', className: 'w-20' },
+                  { key: 'actions', header: '操作', align: 'right', className: 'w-32' },
+                ]}
+                items={channels.map((c) => {
+                  const st = channelStatus(c)
+                  const s = c.stats
+                  const rate = s && s.calls > 0 ? Math.round((s.ok / s.calls) * 100) : null
+                  return {
+                    title: (
+                      <span className="flex items-center gap-1.5">
+                        <span className="truncate">{c.name}</span>
+                        {c.apiFormat !== 'openai' && (
+                          <Badge
+                            variant="outline"
+                            className={cn(
+                              'shrink-0 text-micro font-normal',
+                              c.apiFormat === 'anthropic' && 'border-orange-300 text-orange-600 dark:border-orange-700 dark:text-orange-400'
+                            )}
+                            title={`${formatLabel(c.apiFormat)}格式渠道，网关自动双向转换`}
                           >
-                            <ZapOff className="h-3.5 w-3.5" /> 熔断中
-                          </span>
-                        ) : (
-                          <span className={
-                            'inline-flex items-center gap-1.5 text-xs ' +
-                            (c.status === 'online' ? 'text-emerald-600' : c.status === 'offline' ? 'text-red-500' : 'text-amber-500')
-                          }>
-                            <span className={
-                              'h-1.5 w-1.5 rounded-full ' +
-                              (!c.enabled ? 'bg-zinc-400' : c.status === 'online' ? 'bg-emerald-500' : c.status === 'offline' ? 'bg-red-500' : 'bg-amber-500')
-                            } />
-                            {c.enabled ? (c.status === 'online' ? '在线' : c.status === 'offline' ? '离线' : '未知') : '停用'}
-                            {!c.enabled && c.failStreak > 0 ? '' : c.enabled && c.status === 'offline' && c.failStreak > 1 ? `（${c.failStreak} 连败）` : ''}
-                          </span>
+                            {formatLabel(c.apiFormat)}
+                          </Badge>
                         )}
-                      </TableCell>
-                      <TableCell>
-                        <Switch checked={c.enabled} onCheckedChange={(v) => toggle.mutate({ id: c.id, enabled: v })} />
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <div className="flex justify-end gap-1">
-                          <Button size="sm" variant="ghost" className="h-8 w-8 p-0" title="对话测试（发送一条真实消息，消耗少量额度）" onClick={() => runChatTest(c)}>
+                      </span>
+                    ),
+                    subtitle: c.remark || undefined,
+                    badge: (
+                      <span
+                        className={cn(
+                          'inline-flex items-center gap-1.5 text-caption font-medium',
+                          st.kind === 'ok' && 'text-status-ok',
+                          st.kind === 'danger' && 'text-status-danger',
+                          st.kind === 'warn' && 'text-status-warn',
+                          st.kind === 'idle' && 'text-status-idle'
+                        )}
+                        title={st.hint}
+                      >
+                        <StatusDot kind={st.kind} live={st.live} />
+                        {st.label}
+                      </span>
+                    ),
+                    metrics: [
+                      { label: '模型数', value: <span className="tabular">{c.models.length}</span> },
+                      {
+                        label: '成功率',
+                        value:
+                          rate == null ? (
+                            <span className="text-muted-foreground">未调用</span>
+                          ) : (
+                            <span className="tabular">{rate}%</span>
+                          ),
+                      },
+                      { label: '延迟', value: <LatencyReadout ms={c.latencyMs} /> },
+                      {
+                        label: '近24h',
+                        value:
+                          c.uptime24h == null ? (
+                            <span className="text-muted-foreground">—</span>
+                          ) : (
+                            <span className="tabular">{c.uptime24h}%</span>
+                          ),
+                      },
+                    ],
+                    detail: (
+                      <div className="flex flex-col gap-1.5">
+                        <KeyValue label="Base URL" mono>
+                          {c.baseUrl}
+                        </KeyValue>
+                        <KeyValue label="接口格式">{formatLabel(c.apiFormat)}</KeyValue>
+                        {s && s.calls > 0 && (
+                          <>
+                            <KeyValue label="累计调用">
+                              <span className="tabular">{s.calls.toLocaleString()}</span> 次 · 成功{' '}
+                              <span className="tabular">{s.ok.toLocaleString()}</span>
+                            </KeyValue>
+                            {s.tokens > 0 && <KeyValue label="消耗">{fmtTokens(s.tokens)}</KeyValue>}
+                          </>
+                        )}
+                        {s && s.calls > 0 && <KeyValue label="平均延迟">{fmtLatency(s.avgLatencyMs)}</KeyValue>}
+                        {c.models.length > 0 && (
+                          <KeyValue label="模型">
+                            <span className="mono-id">{c.models.slice(0, 6).join(' · ')}</span>
+                            {c.models.length > 6 && <span className="text-muted-foreground"> +{c.models.length - 6}</span>}
+                          </KeyValue>
+                        )}
+                        {c.lastError && <KeyValue label="最近错误">{c.lastError}</KeyValue>}
+                        {c.lastCheckAt && <KeyValue label="最近探测">{fmtTime(c.lastCheckAt)}</KeyValue>}
+                      </div>
+                    ),
+                    actions: (
+                      <>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="min-h-9"
+                          onClick={() => runChatTest(c)}
+                          title="对话测试（发送一条真实消息，消耗少量额度）"
+                        >
+                          <MessageSquare className="h-3.5 w-3.5" />
+                          测试
+                        </Button>
+                        <Button size="sm" variant="outline" className="min-h-9" onClick={() => openEdit(c)} title="编辑">
+                          <Pencil className="h-3.5 w-3.5" />
+                          编辑
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="min-h-9 text-status-danger"
+                          onClick={() => setDeleteId(c.id)}
+                          title="删除该渠道"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          删除
+                        </Button>
+                      </>
+                    ),
+                    _raw: c,
+                  }
+                })}
+                renderCell={(item, key) => {
+                  const c = item._raw as Channel
+                  const st = channelStatus(c)
+                  const s = c.stats
+                  const rate = s && s.calls > 0 ? Math.round((s.ok / s.calls) * 100) : null
+                  switch (key) {
+                    case 'name':
+                      return (
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <p className="truncate font-medium">{c.name}</p>
+                            {c.apiFormat !== 'openai' && (
+                              <Badge
+                                variant="outline"
+                                className={cn(
+                                  'shrink-0 text-micro font-normal',
+                                  c.apiFormat === 'anthropic' && 'border-orange-300 text-orange-600 dark:border-orange-700 dark:text-orange-400'
+                                )}
+                                title={`${formatLabel(c.apiFormat)}格式渠道，网关自动双向转换`}
+                              >
+                                {formatLabel(c.apiFormat)}
+                              </Badge>
+                            )}
+                          </div>
+                          {c.remark && <p className="truncate text-micro text-muted-foreground">{c.remark}</p>}
+                        </div>
+                      )
+                    case 'baseUrl':
+                      return <Truncate className="mono-id text-muted-foreground">{c.baseUrl}</Truncate>
+                    case 'models':
+                      return <span className="tabular">{c.models.length}</span>
+                    case 'usage':
+                      if (!s || s.calls === 0) return <span className="text-caption text-muted-foreground">未调用</span>
+                      return (
+                        <div className="text-caption leading-tight">
+                          <p className={cn('tabular', successKind(rate ?? 0) === 'danger' ? 'text-status-warn' : 'text-status-ok')}>
+                            {s.calls.toLocaleString()} 次 · {rate}%
+                          </p>
+                          <p className="text-micro text-muted-foreground">
+                            均值 {fmtLatency(s.avgLatencyMs)}
+                            {s.tokens > 0 ? ` · ${fmtTokens(s.tokens)}` : ''}
+                            {c.uptime24h != null ? ` · 探测 ${c.uptime24h}%` : ''}
+                          </p>
+                        </div>
+                      )
+                    case 'status':
+                      return (
+                        <span
+                          className={cn(
+                            'inline-flex items-center gap-1.5 text-caption font-medium',
+                            st.kind === 'ok' && 'text-status-ok',
+                            st.kind === 'danger' && 'text-status-danger',
+                            st.kind === 'warn' && 'text-status-warn',
+                            st.kind === 'idle' && 'text-status-idle'
+                          )}
+                          title={st.hint}
+                        >
+                          <StatusDot kind={st.kind} live={st.live} />
+                          {st.label}
+                        </span>
+                      )
+                    case 'enabled':
+                      return (
+                        <Switch
+                          checked={c.enabled}
+                          onCheckedChange={(v) => toggle.mutate({ id: c.id, enabled: v })}
+                          aria-label={`${c.name} 启用开关`}
+                        />
+                      )
+                    case 'actions':
+                      return (
+                        <div className="flex justify-end gap-0.5">
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8"
+                            title="对话测试（发送一条真实消息，消耗少量额度）"
+                            onClick={() => runChatTest(c)}
+                          >
                             <MessageSquare className="h-4 w-4" />
                           </Button>
-                          <Button size="sm" variant="ghost" className="h-8 w-8 p-0" onClick={() => openEdit(c)} title="编辑">
+                          <Button size="icon" variant="ghost" className="h-8 w-8" onClick={() => openEdit(c)} title="编辑">
                             <Pencil className="h-4 w-4" />
                           </Button>
-                          <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-destructive" onClick={() => setDeleteId(c.id)} title="删除">
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8 text-status-danger"
+                            onClick={() => setDeleteId(c.id)}
+                            title="删除"
+                          >
                             <Trash2 className="h-4 w-4" />
                           </Button>
                         </div>
-                      </TableCell>
-                    </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
-          </div>
+                      )
+                    default:
+                      return null
+                  }
+                }}
+              />
+            </div>
+          )}
         </CardContent>
       </Card>
 

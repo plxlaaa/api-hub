@@ -17,9 +17,12 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { EmptyState, SkeletonRows } from '@/components/feedback'
+import { KeyValue, StatusDot } from '@/components/metrics'
+import { ResponsiveList } from '@/components/responsive-list'
 import { api, fmtTime, fmtTokens } from '@/lib/api-client'
 import { copyToClipboard } from '@/lib/clipboard'
+import { cn } from '@/lib/utils'
 import type { ApiTokenItem } from '@/types'
 
 /** 用量进度条（limit=null 显示「不限」） */
@@ -151,67 +154,196 @@ export function TokensTab() {
   return (
     <div className="space-y-4">
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0">
-          <CardTitle className="text-base">统一调用密钥（{tokens.length}）</CardTitle>
-          <Button size="sm" onClick={() => { setNewKey(null); setCreateOpen(true) }}>
+        <CardHeader className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <CardTitle className="text-base">
+            <span className="hidden lg:inline">统一调用密钥</span>
+            <span className="lg:hidden">共 </span>
+            <span className="tabular text-caption font-normal text-muted-foreground">{tokens.length}</span>
+            <span className="lg:hidden text-caption font-normal text-muted-foreground">个密钥</span>
+          </CardTitle>
+          <Button size="sm" onClick={() => { setNewKey(null); setCreateOpen(true) }} className="shrink-0">
             <Plus className="h-4 w-4" />生成密钥
           </Button>
         </CardHeader>
         <CardContent>
-          <div className="max-h-[28rem] overflow-y-auto rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>名称</TableHead>
-                  <TableHead>密钥</TableHead>
-                  <TableHead>用量</TableHead>
-                  <TableHead className="hidden md:table-cell">最后使用</TableHead>
-                  <TableHead>启用</TableHead>
-                  <TableHead className="text-right">操作</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {isLoading ? (
-                  <TableRow><TableCell colSpan={6} className="h-16 text-center"><Loader2 className="mx-auto h-4 w-4 animate-spin" /></TableCell></TableRow>
-                ) : tokens.length === 0 ? (
-                  <TableRow><TableCell colSpan={6} className="h-16 text-center text-muted-foreground">暂无密钥，点击「生成密钥」创建一个统一调用 Key</TableCell></TableRow>
-                ) : (
-                  tokens.map((t) => (
-                    <TableRow key={t.id}>
-                      <TableCell className="font-medium">{t.name}</TableCell>
-                      <TableCell>
-                        <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{t.key}</code>
-                      </TableCell>
-                      <TableCell>
-                        <QuotaCell t={t} />
-                        {t.usage && t.usage.calls > 0 ? (
-                          <p className="mt-0.5 text-[11px] tabular-nums text-muted-foreground">
-                            {t.usage.calls} 次调用{t.usage.tokens > 0 ? ` · ${fmtTokens(t.usage.tokens)}` : ''}
-                          </p>
-                        ) : (
-                          <p className="mt-0.5 text-[11px] text-muted-foreground">未调用</p>
+          {isLoading ? (
+            <SkeletonRows rows={3} />
+          ) : tokens.length === 0 ? (
+            <EmptyState
+              compact
+              icon={KeyRound}
+              title="还没有统一调用密钥"
+              description="生成一个 Key，客户端就能用它访问网关转发的所有模型，无需再关心上游渠道的 Key。"
+              action={
+                <Button size="sm" onClick={() => { setNewKey(null); setCreateOpen(true) }}>
+                  <Plus className="h-4 w-4" />生成第一个密钥
+                </Button>
+              }
+            />
+          ) : (
+            <div className="max-h-[32rem] overflow-y-auto pr-1">
+              <ResponsiveList
+                keyOf={(t) => (t._raw as ApiTokenItem).id}
+                className="space-y-1.5"
+                columns={[
+                  { key: 'name', header: '名称' },
+                  { key: 'key', header: '密钥' },
+                  { key: 'usage', header: '用量' },
+                  { key: 'lastUsed', header: '最后使用', className: 'hidden md:table-cell' },
+                  { key: 'enabled', header: '启用', className: 'w-20' },
+                  { key: 'actions', header: '操作', align: 'right', className: 'w-28' },
+                ]}
+                items={tokens.map((t) => {
+                  const hasLimit = t.quotaLimit !== null
+                  const pct = hasLimit ? Math.min(100, Math.round((t.quotaUsed / t.quotaLimit!) * 100)) : null
+                  return {
+                    title: t.name,
+                    subtitle: <span className="mono-id">{t.key}</span>,
+                    badge: (
+                      <span
+                        className={cn(
+                          'inline-flex items-center gap-1.5 text-caption font-medium',
+                          t.enabled ? 'text-status-ok' : 'text-status-idle'
                         )}
-                      </TableCell>
-                      <TableCell className="hidden text-xs text-muted-foreground md:table-cell">{fmtTime(t.lastUsedAt)}</TableCell>
-                      <TableCell><Switch checked={t.enabled} onCheckedChange={(v) => toggle.mutate({ id: t.id, enabled: v })} /></TableCell>
-                      <TableCell className="text-right">
-                        <div className="flex items-center justify-end gap-1">
+                      >
+                        <StatusDot kind={t.enabled ? 'ok' : 'idle'} />
+                        {t.enabled ? '启用' : '停用'}
+                      </span>
+                    ),
+                    metrics: [
+                      {
+                        label: '已用配额',
+                        value:
+                          pct == null ? (
+                            <span className="text-muted-foreground">不限量</span>
+                          ) : (
+                            <span className="tabular">
+                              {t.quotaUsed} / {t.quotaLimit}
+                            </span>
+                          ),
+                      },
+                      {
+                        label: '调用次数',
+                        value: <span className="tabular">{(t.usage?.calls ?? 0).toLocaleString()}</span>,
+                      },
+                      {
+                        label: '消耗 Token',
+                        value:
+                          t.usage && t.usage.tokens > 0 ? (
+                            fmtTokens(t.usage.tokens)
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          ),
+                      },
+                      {
+                        label: '最后使用',
+                        value: <span className="tabular text-caption">{fmtTime(t.lastUsedAt)}</span>,
+                      },
+                    ],
+                    detail: (
+                      <div className="flex flex-col gap-1.5">
+                        <KeyValue label="完整密钥" mono>
+                          {t.key}
+                        </KeyValue>
+                        <KeyValue label="创建时间">{fmtTime(t.createdAt)}</KeyValue>
+                        {t.usage?.lastCallAt && <KeyValue label="最近调用">{fmtTime(t.usage.lastCallAt)}</KeyValue>}
+                      </div>
+                    ),
+                    actions: (
+                      <>
+                        <CopyMenu k={t.key} name={t.name} />
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="min-h-9"
+                          title="用量配额"
+                          onClick={() => {
+                            setQuotaOpen(t)
+                            setQuotaInput(t.quotaLimit === null ? '' : String(t.quotaLimit))
+                          }}
+                        >
+                          <Gauge className="h-3.5 w-3.5" />
+                          配额
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="min-h-9 text-status-danger"
+                          title="删除密钥"
+                          onClick={() => setDeleteId(t.id)}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          删除
+                        </Button>
+                      </>
+                    ),
+                    _raw: t,
+                  }
+                })}
+                renderCell={(item, key) => {
+                  const t = item._raw as ApiTokenItem
+                  switch (key) {
+                    case 'name':
+                      return <span className="font-medium">{t.name}</span>
+                    case 'key':
+                      return <code className="mono-id rounded bg-muted px-1.5 py-0.5">{t.key}</code>
+                    case 'usage':
+                      return (
+                        <div>
+                          <QuotaCell t={t} />
+                          {t.usage && t.usage.calls > 0 ? (
+                            <p className="mt-0.5 text-micro tabular text-muted-foreground">
+                              {t.usage.calls} 次调用{t.usage.tokens > 0 ? ` · ${fmtTokens(t.usage.tokens)}` : ''}
+                            </p>
+                          ) : (
+                            <p className="mt-0.5 text-micro text-muted-foreground">未调用</p>
+                          )}
+                        </div>
+                      )
+                    case 'lastUsed':
+                      return <span className="tabular text-micro text-muted-foreground">{fmtTime(t.lastUsedAt)}</span>
+                    case 'enabled':
+                      return (
+                        <Switch
+                          checked={t.enabled}
+                          onCheckedChange={(v) => toggle.mutate({ id: t.id, enabled: v })}
+                          aria-label={`${t.name} 启用开关`}
+                        />
+                      )
+                    case 'actions':
+                      return (
+                        <div className="flex items-center justify-end gap-0.5">
                           <CopyMenu k={t.key} name={t.name} />
                           <Button
-                            size="sm" variant="ghost" className="h-8 w-8 p-0" title="用量配额"
-                            onClick={() => { setQuotaOpen(t); setQuotaInput(t.quotaLimit === null ? '' : String(t.quotaLimit)) }}
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8"
+                            title="用量配额"
+                            onClick={() => {
+                              setQuotaOpen(t)
+                              setQuotaInput(t.quotaLimit === null ? '' : String(t.quotaLimit))
+                            }}
                           >
                             <Gauge className="h-4 w-4" />
                           </Button>
-                          <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-destructive" onClick={() => setDeleteId(t.id)}><Trash2 className="h-4 w-4" /></Button>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8 text-status-danger"
+                            title="删除密钥"
+                            onClick={() => setDeleteId(t.id)}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
                         </div>
-                      </TableCell>
-                    </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
-          </div>
+                      )
+                    default:
+                      return null
+                  }
+                }}
+              />
+            </div>
+          )}
         </CardContent>
       </Card>
 

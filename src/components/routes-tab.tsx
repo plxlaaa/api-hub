@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowDown, ArrowUp, Copy, FlaskConical, Loader2, Pencil, Plus, RefreshCw, Trash2, X, XCircle } from 'lucide-react'
+import { ArrowDown, ArrowUp, Copy, FlaskConical, Loader2, Pencil, Plus, RefreshCw, Route, Trash2, X, XCircle } from 'lucide-react'
 import { toast } from 'sonner'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import {
@@ -17,8 +17,16 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { api, fmtTime } from '@/lib/api-client'
+import { EmptyState, SkeletonRows } from '@/components/feedback'
+import { KeyValue } from '@/components/metrics'
+import { ResponsiveList } from '@/components/responsive-list'
+import {
+  ChannelAvailBadge,
+  RouteChannelBadges,
+  RouteUsage,
+  STRATEGY_META,
+} from '@/components/route-badges'
+import { api, fmtTime, fmtTokens } from '@/lib/api-client'
 import type { Channel, ModelRoute, RouteChannelConfig, RouteStrategy } from '@/types'
 import { cn } from '@/lib/utils'
 
@@ -36,14 +44,6 @@ interface RouteForm {
 
 const EMPTY_FORM: RouteForm = { displayName: '', targetModel: '', channelConfigs: [], strategy: 'priority', priceIn: '', priceOut: '', remark: '', enabled: true }
 
-const STRATEGY_META: Record<RouteStrategy, { label: string; desc: string }> = {
-  priority: { label: '优先级', desc: '排在前面的渠道优先使用，失败自动切换下一个' },
-  weighted: { label: '权重随机', desc: '按权重随机分流到各渠道，失败自动切换其他渠道' },
-  speed: { label: '速度优先', desc: '自动选探测延迟最低的渠道（数据来自定时探测），失败切换次快' },
-  quality: { label: '智商优先', desc: '优先用智商分高的渠道模型（在下方手动标注 1-10 分），失败切换' },
-  stability: { label: '稳定优先', desc: '按近 7 天真实调用成功率排序（来自调用日志），失败切换' },
-  cost: { label: '成本优先', desc: '按渠道标注价格升序（渠道 metadata 里配 priceIn/priceOut），失败切换' },
-}
 
 export function RoutesTab() {
   const qc = useQueryClient()
@@ -67,13 +67,12 @@ export function RoutesTab() {
   const [previewErr, setPreviewErr] = useState('')
   const [previewNonce, setPreviewNonce] = useState(0)
   useEffect(() => {
-    if (!dialogOpen || form.channelConfigs.length === 0) {
-      setPreviewData(null)
-      return
-    }
-    setPreviewLoading(true)
-    setPreviewErr('')
+    if (!dialogOpen || form.channelConfigs.length === 0) return
+    // 不在 effect 体内同步 setState：加载态由下面的 timeout 统一接管，
+    // 避免级联渲染（react-hooks/set-state-in-effect）
     const t = setTimeout(async () => {
+      setPreviewLoading(true)
+      setPreviewErr('')
       try {
         const r = await api<typeof previewData>('/api/routes/preview', {
           method: 'POST',
@@ -90,10 +89,12 @@ export function RoutesTab() {
   }, [dialogOpen, form.strategy, form.channelConfigs, previewNonce])
 
   const channelName = useMemo(() => new Map(channels.map((c) => [c.id, c.name])), [channels])
+  /** Map → 查名函数，供徽章组件使用（缺失渠道显示「已删除」） */
+  const nameOfChannel = (id: string) => channelName.get(id) ?? '(已删除)'
   const channelModels = useMemo(() => new Map(channels.map((c) => [c.id, c.models])), [channels])
   const allModels = useMemo(() => Array.from(new Set(channels.flatMap((c) => c.models))).sort(), [channels])
 
-  const openCreate = () => { setForm(EMPTY_FORM); setDialogOpen(true) }
+  const openCreate = () => { setForm(EMPTY_FORM); setPreviewData(null); setPreviewErr(''); setDialogOpen(true) }
   const openEdit = (r: ModelRoute) => {
     setForm({
       id: r.id,
@@ -106,6 +107,8 @@ export function RoutesTab() {
       remark: r.remark || '',
       enabled: r.enabled,
     })
+    setPreviewData(null)
+    setPreviewErr('')
     setDialogOpen(true)
   }
   // 复制路由：预填内容，改显示名即可保存为新路由
@@ -213,134 +216,207 @@ export function RoutesTab() {
   return (
     <div className="space-y-4">
       <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0">
-          <CardTitle className="text-base">模型路由（{routes.length}）</CardTitle>
-          <Button size="sm" onClick={openCreate}><Plus className="h-4 w-4" />添加路由</Button>
+        <CardHeader className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <CardTitle className="text-base">
+              <span className="hidden lg:inline">模型路由</span>
+              <span className="lg:hidden">共 </span>
+              <span className="tabular text-caption font-normal text-muted-foreground">{routes.length}</span>
+              <span className="lg:hidden text-caption font-normal text-muted-foreground">条路由</span>
+            </CardTitle>
+            <Button size="sm" onClick={openCreate} className="shrink-0">
+              <Plus className="h-4 w-4" />添加路由
+            </Button>
+          </div>
         </CardHeader>
         <CardContent>
-          <div className="max-h-[32rem] overflow-y-auto rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>显示名（对外）</TableHead>
-                  <TableHead>实际模型（上游）</TableHead>
-                  <TableHead className="hidden md:table-cell">调用</TableHead>
-                  <TableHead className="hidden lg:table-cell">渠道与策略</TableHead>
-                  <TableHead>启用</TableHead>
-                  <TableHead className="text-right">操作</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {isLoading ? (
-                  <TableRow><TableCell colSpan={6} className="h-16 text-center"><Loader2 className="mx-auto h-4 w-4 animate-spin" /></TableCell></TableRow>
-                ) : routes.length === 0 ? (
-                  <TableRow><TableCell colSpan={6} className="h-16 text-center text-muted-foreground">暂无路由。添加后客户端即可用「显示名」调用网关</TableCell></TableRow>
-                ) : (
-                  routes.map((r) => (
-                    <TableRow key={r.id}>
-                      <TableCell className="font-medium"><code className="rounded bg-muted px-1.5 py-0.5 text-xs">{r.displayName}</code></TableCell>
-                      <TableCell className="text-sm text-muted-foreground">
-                        {r.targetModel === '*' ? <span className="italic">透传请求模型名</span> : r.targetModel}
-                      </TableCell>
-                      <TableCell className="hidden md:table-cell">
-                        {(() => {
-                          const s = r.stats
-                          if (!s || s.total === 0) return <span className="text-xs text-muted-foreground">—</span>
-                          const rate = Math.round((s.ok / s.total) * 100)
-                          // 花费粗估：已标注价格的路按输入输出均价 × 累计 Token 折算（totalTokens 不分输入/输出，仅供参考）
-                          const avgPrice = r.priceIn != null || r.priceOut != null ? ((r.priceIn ?? 0) + (r.priceOut ?? 0)) / 2 : null
-                          const cost = avgPrice != null && s.tokens > 0 ? (s.tokens / 1_000_000) * avgPrice : null
-                          return (
-                            <div className="text-xs leading-tight">
-                              <p className={cn('tabular-nums', rate < 80 ? 'text-amber-600' : 'text-emerald-600')}>{s.total} 次 · {rate}%</p>
-                              <p className="text-muted-foreground">
-                                {s.lastUsedAt ? `最近 ${fmtTime(s.lastUsedAt)}` : ''}
-                                {cost != null && <span className="ml-1 tabular-nums">· ${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}</span>}
-                              </p>
-                            </div>
-                          )
-                        })()}
-                      </TableCell>
-                      <TableCell className="hidden lg:table-cell">
-                        <div className="flex flex-wrap items-center gap-1">
-                          <Badge variant="outline" className={cn('text-xs font-normal', r.strategy === 'weighted' ? 'border-amber-400 text-amber-600' : 'border-emerald-300 text-emerald-600')}>
-                            {STRATEGY_META[r.strategy].label}
-                          </Badge>
-                          {(() => {
-                            const stats = { online: 0, dead: 0, off: 0 }
-                            for (const cfg of r.channelConfigs) {
-                              const ch = channels.find((c) => c.id === cfg.id)
-                              if (!ch || !ch.enabled) stats.off++
-                              else if (ch.autoDisabled) stats.dead++
-                              else stats.online++
-                            }
-                            return (
-                              <Badge
-                                variant="outline"
-                                className={cn(
-                                  'text-xs font-normal',
-                                  stats.online === 0 ? 'border-red-300 text-red-600' : 'border-emerald-300 text-emerald-600'
-                                )}
-                                title={stats.online === 0 ? '该路由当前没有可用渠道' : `${stats.online}/${r.channelConfigs.length} 个渠道可用`}
-                              >
-                                {stats.online}/{r.channelConfigs.length} 可用
-                              </Badge>
-                            )
-                          })()}
-                          {r.channelConfigs.map((cfg, i) => {
-                            const ch = channels.find((c) => c.id === cfg.id)
-                            const dot = !ch || !ch.enabled
-                              ? 'bg-zinc-400'
-                              : ch.autoDisabled
-                                ? 'bg-red-500'
-                                : ch.status === 'online'
-                                  ? 'bg-emerald-500'
-                                  : 'bg-amber-500'
-                            const tone = !ch || !ch.enabled
-                              ? 'border-zinc-200 text-zinc-400 dark:border-zinc-700'
-                              : ch.autoDisabled
-                                ? 'border-red-300 text-red-600 dark:border-red-800'
-                                : ''
-                            const prefix = r.strategy === 'priority'
-                              ? String(i + 1)
-                              : r.strategy === 'weighted'
-                                ? `w${cfg.weight ?? 1}`
-                                : r.strategy === 'quality'
-                                  ? `q${cfg.quality ?? 5}`
-                                  : ''
-                            return (
-                              <Badge
-                                key={cfg.id}
-                                variant="outline"
-                                className={cn('gap-1 text-xs font-normal', tone)}
-                                title={!ch ? '渠道已删除' : !ch.enabled ? '渠道已停用' : ch.autoDisabled ? '渠道熔断中，转发自动跳过' : '正常'}
-                              >
-                                <span className={cn('h-1.5 w-1.5 rounded-full', dot)} />
-                                {prefix && <span className="font-semibold text-emerald-600">{prefix}</span>}
-                                {channelName.get(cfg.id) || '(已删除)'}
-                                {cfg.model && <span className="text-muted-foreground">→{cfg.model}</span>}
-                              </Badge>
-                            )
-                          })}
+          {isLoading ? (
+            <SkeletonRows rows={4} />
+          ) : routes.length === 0 ? (
+            <EmptyState
+              icon={Route}
+              title="还没有配置模型路由"
+              description="路由决定「客户端用一个模型名，网关内部选哪个渠道」。配置后客户端只需知道显示名，切换上游无需改动配置。"
+              action={
+                <Button size="sm" onClick={openCreate}>
+                  <Plus className="h-4 w-4" />添加第一条路由
+                </Button>
+              }
+            />
+          ) : (
+            <div className="max-h-[36rem] overflow-y-auto">
+              <ResponsiveList
+                keyOf={(r) => (r._raw as ModelRoute).id}
+                className="space-y-1.5"
+                columns={[
+                  { key: 'displayName', header: '显示名（对外）' },
+                  { key: 'targetModel', header: '实际模型（上游）' },
+                  { key: 'usage', header: '调用', className: 'hidden md:table-cell' },
+                  { key: 'channels', header: '渠道与策略', className: 'hidden lg:table-cell' },
+                  { key: 'enabled', header: '启用', className: 'w-20' },
+                  { key: 'actions', header: '操作', align: 'right', className: 'w-32' },
+                ]}
+                items={routes.map((r) => {
+                  const s = r.stats
+                  const rate = s && s.total > 0 ? Math.round((s.ok / s.total) * 100) : null
+                  return {
+                    title: <span className="mono-id font-medium text-foreground">{r.displayName}</span>,
+                    subtitle: r.remark || STRATEGY_META[r.strategy].desc,
+                    badge: <ChannelAvailBadge route={r} channels={channels} />,
+                    metrics: [
+                      {
+                        label: '成功率',
+                        value:
+                          rate == null ? (
+                            <span className="text-muted-foreground">未调用</span>
+                          ) : (
+                            <span className="tabular">{rate}%</span>
+                          ),
+                      },
+                      { label: '调用次数', value: <span className="tabular">{(s?.total ?? 0).toLocaleString()}</span> },
+                      {
+                        label: '实际模型',
+                        value: r.targetModel === '*' ? <span className="text-muted-foreground">透传</span> : <span className="mono-id">{r.targetModel}</span>,
+                      },
+                      {
+                        label: '绑定渠道',
+                        value: <span className="tabular">{r.channelConfigs.length}</span>,
+                      },
+                    ],
+                    detail: (
+                      <div className="flex flex-col gap-1.5">
+                        <KeyValue label="实际模型" mono>
+                          {r.targetModel === '*' ? '透传请求中的模型名' : r.targetModel}
+                        </KeyValue>
+                        <KeyValue label="策略">{STRATEGY_META[r.strategy].desc}</KeyValue>
+                        <div>
+                          <p className="mb-1 text-micro tracking-[0.04em] text-muted-foreground uppercase">渠道顺序</p>
+                          <RouteChannelBadges route={r} channels={channels} nameOf={nameOfChannel} compact />
                         </div>
-                      </TableCell>
-                      <TableCell><Switch checked={r.enabled} onCheckedChange={(v) => toggle.mutate({ id: r.id, enabled: v })} /></TableCell>
-                      <TableCell className="text-right">
-                        <div className="flex justify-end gap-1">
-                          <Button size="sm" variant="ghost" className="h-8 w-8 p-0" title="一键测试（走真实网关链路发一条消息，管理测试模式不消耗密钥配额）" disabled={testingId === r.id} onClick={() => testRoute(r)}>
+                        {s && s.total > 0 && (
+                          <>
+                            <KeyValue label="累计调用">
+                              <span className="tabular">{s.total.toLocaleString()}</span> 次 · 成功{' '}
+                              <span className="tabular">{s.ok.toLocaleString()}</span>
+                            </KeyValue>
+                            {s.tokens > 0 && <KeyValue label="消耗">{fmtTokens(s.tokens)}</KeyValue>}
+                            {s.lastUsedAt && <KeyValue label="最近使用">{fmtTime(s.lastUsedAt)}</KeyValue>}
+                          </>
+                        )}
+                        {(r.priceIn != null || r.priceOut != null) && (
+                          <KeyValue label="计价">
+                            入 {(r.priceIn ?? 0).toFixed(2)} · 出 {(r.priceOut ?? 0).toFixed(2)}
+                          </KeyValue>
+                        )}
+                      </div>
+                    ),
+                    actions: (
+                      <>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="min-h-9"
+                          disabled={testingId === r.id}
+                          onClick={() => testRoute(r)}
+                          title="一键测试（走真实网关链路发一条消息）"
+                        >
+                          {testingId === r.id ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FlaskConical className="h-3.5 w-3.5" />}
+                          测试
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="min-h-9"
+                          onClick={() => openDuplicate(r)}
+                          title="复制此路由"
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                          复制
+                        </Button>
+                        <Button size="sm" variant="outline" className="min-h-9" onClick={() => openEdit(r)} title="编辑">
+                          <Pencil className="h-3.5 w-3.5" />
+                          编辑
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="min-h-9 text-status-danger"
+                          onClick={() => setDeleteId(r.id)}
+                          title="删除"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                          删除
+                        </Button>
+                      </>
+                    ),
+                    _raw: r,
+                  }
+                })}
+                renderCell={(item, key) => {
+                  const r = item._raw as ModelRoute
+                  switch (key) {
+                    case 'displayName':
+                      return (
+                        <div className="min-w-0">
+                          <p className="mono-id font-medium">{r.displayName}</p>
+                          {r.remark && <p className="truncate text-micro text-muted-foreground">{r.remark}</p>}
+                        </div>
+                      )
+                    case 'targetModel':
+                      return (
+                        <span className="text-caption text-muted-foreground">
+                          {r.targetModel === '*' ? <span className="italic">透传请求模型名</span> : r.targetModel}
+                        </span>
+                      )
+                    case 'usage':
+                      return <RouteUsage route={r} />
+                    case 'channels':
+                      return <RouteChannelBadges route={r} channels={channels} nameOf={nameOfChannel} />
+                    case 'enabled':
+                      return (
+                        <Switch
+                          checked={r.enabled}
+                          onCheckedChange={(v) => toggle.mutate({ id: r.id, enabled: v })}
+                          aria-label={`${r.displayName} 启用开关`}
+                        />
+                      )
+                    case 'actions':
+                      return (
+                        <div className="flex justify-end gap-0.5">
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8"
+                            title="一键测试"
+                            disabled={testingId === r.id}
+                            onClick={() => testRoute(r)}
+                          >
                             {testingId === r.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <FlaskConical className="h-4 w-4" />}
                           </Button>
-                          <Button size="sm" variant="ghost" className="h-8 w-8 p-0" title="复制此路由（改个显示名即可保存）" onClick={() => openDuplicate(r)}><Copy className="h-4 w-4" /></Button>
-                          <Button size="sm" variant="ghost" className="h-8 w-8 p-0" onClick={() => openEdit(r)}><Pencil className="h-4 w-4" /></Button>
-                          <Button size="sm" variant="ghost" className="h-8 w-8 p-0 text-destructive" onClick={() => setDeleteId(r.id)}><Trash2 className="h-4 w-4" /></Button>
+                          <Button size="icon" variant="ghost" className="h-8 w-8" title="复制此路由" onClick={() => openDuplicate(r)}>
+                            <Copy className="h-4 w-4" />
+                          </Button>
+                          <Button size="icon" variant="ghost" className="h-8 w-8" title="编辑" onClick={() => openEdit(r)}>
+                            <Pencil className="h-4 w-4" />
+                          </Button>
+                          <Button
+                            size="icon"
+                            variant="ghost"
+                            className="h-8 w-8 text-status-danger"
+                            title="删除"
+                            onClick={() => setDeleteId(r.id)}
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </Button>
                         </div>
-                      </TableCell>
-                    </TableRow>
-                  ))
-                )}
-              </TableBody>
-            </Table>
-          </div>
+                      )
+                    default:
+                      return null
+                  }
+                }}
+              />
+            </div>
+          )}
         </CardContent>
       </Card>
 
