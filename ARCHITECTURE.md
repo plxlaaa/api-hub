@@ -24,7 +24,19 @@ src/
 │  └─ db.ts              Prisma 单例
 ├─ app/api/              Next.js 路由处理器（薄壳，业务在 lib）
 └─ components/           管理台 UI（tabs 平铺）
+install-api-hub.sh       Linux 一键安装/更新/卸载（systemd 常驻）
+install-api-hub.ps1      Windows 一键安装/更新/卸载（计划任务 / nssm）
+doctor.mjs               环境自检
 ```
+
+## 部署脚本（非扩展点，运维面）
+
+两个脚本只做「拉源码 → 装依赖 → 建库 → 构建 → 注册常驻服务」，不改动任何业务代码。改它们时注意两条硬约束：
+
+1. **工作目录即数据库位置**。`src/lib/db.ts` 与 `src/lib/credentials.ts` 都按 `process.cwd()/db/` 定位 SQLite 与凭据文件，
+   所以 systemd 的 `WorkingDirectory` 必须是项目根（`next start` 而非 standalone 就是为了保住这个前提）。
+2. **私有仓库走 PAT + tarball**，不依赖 git 鉴权：`api.github.com/repos/<owner>/<repo>/tarball/<branch>`，
+   解包时 `--strip-components=1`；已有 `db/` 时绝不覆盖，更新前先备份。
 
 ## 扩展点①：新增上游协议（如 Gemini、Azure）
 
