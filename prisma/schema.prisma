@@ -1,32 +1,97 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client-js"
 }
 
 datasource db {
   provider = "sqlite"
-  url      = env("DATABASE_URL")
+  url      = "file:../db/custom.db"
 }
 
-model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+// 系统设置（管理密码哈希、JWT 密钥等，key-value 存储）
+model Setting {
+  id    String @id @default(cuid())
+  key   String @unique
+  value String
 }
 
-model Post {
-  id        String   @id @default(cuid())
-  title     String
-  content   String?
-  published Boolean  @default(false)
-  authorId  String
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+// 渠道：上游公益站 API（OpenAI 兼容）
+model Channel {
+  id          String     @id @default(cuid())
+  name        String
+  baseUrl     String // 上游地址，填到域名或 /v1 均可
+  apiKey      String
+  apiFormat   String     @default("openai") // openai | anthropic（Claude 原生 /v1/messages）
+  models      String     @default("[]") // 上游支持的模型名，JSON 字符串数组
+  enabled     Boolean    @default(true)
+  autoDisabled Boolean   @default(false) // 熔断器自动摘除（区别于手动 enabled=false）
+  failStreak  Int        @default(0) // 探测连续失败次数
+  autoDisabledAt DateTime?
+  status      String     @default("unknown") // online | offline | unknown
+  latencyMs   Int?
+  lastCheckAt DateTime?
+  lastError   String?
+  remark      String?
+  metadata    Json? // 扩展配置空间（分组/标签/自定义参数），不改 schema 即可挂新属性
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  probeLogs   ProbeLog[]
+}
+
+// 模型路由：对外模型显示名 -> 上游真实模型名 + 渠道配置（每渠道可独立模型名/权重）
+model ModelRoute {
+  id             String   @id @default(cuid())
+  displayName    String   @unique // 客户端请求里填的 model 名
+  targetModel    String // 实际转发给上游的模型名（该渠道未单独配置时的默认值）
+  channelIds     String   @default("[]") // JSON 数组，有序（兼容旧数据/导出）
+  channelConfigs String   @default("[]") // JSON 数组 [{id, model?, weight?}]，与 channelIds 同步
+  strategy       String   @default("priority") // priority 顺序故障转移 | weighted 权重随机
+  priceIn        Float? // 输入价格（美元/百万 token），null=未标注，0=免费
+  priceOut       Float? // 输出价格（美元/百万 token）
+  enabled        Boolean  @default(true)
+  remark         String?
+  metadata       Json? // 扩展配置空间（如按模型限速、专属渠道组）
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+}
+
+// 统一调用密钥（客户端用它调用本网关）
+model ApiToken {
+  id         String    @id @default(cuid())
+  name       String
+  key        String    @unique
+  enabled    Boolean   @default(true)
+  quotaLimit Int? // 总请求次数上限（null=不限）
+  quotaUsed  Int       @default(0)
+  lastUsedAt DateTime?
+  metadata   Json? // 扩展配置空间（如按密钥的模型白名单、速率限制）
+  createdAt  DateTime  @default(now())
+}
+
+// 探测日志
+model ProbeLog {
+  id         String   @id @default(cuid())
+  channelId  String
+  ok         Boolean
+  latencyMs  Int?
+  statusCode Int?
+  error      String?
+  createdAt  DateTime @default(now())
+  channel    Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+}
+
+// 网关调用日志（渠道名存快照，渠道删除后日志仍可读）
+model RequestLog {
+  id          String   @id @default(cuid())
+  channelName String
+  model       String // 对外模型显示名
+  targetModel String // 上游真实模型名
+  ok          Boolean
+  statusCode  Int?
+  latencyMs   Int?
+  totalTokens Int?
+  tokenName   String?  // 发起请求的统一密钥名（管理员测试为空）
+  stream      Boolean  @default(false)
+  attempt     Int      @default(1) // 第几次渠道尝试（故障转移时 2/3…）
+  error       String?
+  createdAt   DateTime @default(now())
 }

@@ -51,7 +51,7 @@
   --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
+  --primary: oklch(0.596 0.145 163.225);
   --primary-foreground: oklch(0.985 0 0);
   --secondary: oklch(0.97 0 0);
   --secondary-foreground: oklch(0.205 0 0);
@@ -62,7 +62,7 @@
   --destructive: oklch(0.577 0.245 27.325);
   --border: oklch(0.922 0 0);
   --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
+  --ring: oklch(0.596 0.145 163.225);
   --chart-1: oklch(0.646 0.222 41.116);
   --chart-2: oklch(0.6 0.118 184.704);
   --chart-3: oklch(0.398 0.07 227.392);
@@ -70,7 +70,7 @@
   --chart-5: oklch(0.769 0.188 70.08);
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
+  --sidebar-primary: oklch(0.596 0.145 163.225);
   --sidebar-primary-foreground: oklch(0.985 0 0);
   --sidebar-accent: oklch(0.97 0 0);
   --sidebar-accent-foreground: oklch(0.205 0 0);
@@ -79,36 +79,36 @@
 }
 
 .dark {
-  --background: oklch(0.145 0 0);
+  --background: #1b1b1b;
   --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
+  --card: #232323;
   --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
+  --popover: #232323;
   --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
+  --primary: oklch(0.696 0.17 162.48);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: #2d2d2d;
   --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
+  --muted: #2d2d2d;
+  --muted-foreground: #a8a8a8;
+  --accent: #2d2d2d;
   --accent-foreground: oklch(0.985 0 0);
   --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
+  --border: rgb(255 255 255 / 14%);
+  --input: rgb(255 255 255 / 18%);
+  --ring: oklch(0.696 0.17 162.48);
   --chart-1: oklch(0.488 0.243 264.376);
   --chart-2: oklch(0.696 0.17 162.48);
   --chart-3: oklch(0.769 0.188 70.08);
   --chart-4: oklch(0.627 0.265 303.9);
   --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
+  --sidebar: #232323;
   --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
+  --sidebar-primary: oklch(0.596 0.145 163.225);
   --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
+  --sidebar-accent: #2d2d2d;
   --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-border: rgb(255 255 255 / 14%);
   --sidebar-ring: oklch(0.556 0 0);
 }
 
@@ -118,5 +118,64 @@
   }
   body {
     @apply bg-background text-foreground;
+    /* 背景加一点纵向冷灰渐变，页面不至于纯平 */
+    background-image: linear-gradient(180deg, oklch(0.985 0.005 163) 0%, var(--background) 240px);
+  }
+  .dark body {
+    background-image: linear-gradient(180deg, #202320 0%, var(--background) 240px);
+  }
+
+  /* 全局过渡基调：交互元素统一 150ms */
+  button, a, [role="button"], [role="tab"], input, select, textarea {
+    transition: background-color 150ms ease-out, border-color 150ms ease-out, color 150ms ease-out, box-shadow 150ms ease-out;
+  }
+
+  /* 细滚动条（暗色适配） */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: rgb(0 0 0 / 0.18) transparent;
+  }
+  .dark * {
+    scrollbar-color: rgb(255 255 255 / 0.18) transparent;
+  }
+  *::-webkit-scrollbar { width: 6px; height: 6px; }
+  *::-webkit-scrollbar-track { background: transparent; }
+  *::-webkit-scrollbar-thumb { border-radius: 9999px; background: rgb(0 0 0 / 0.18); }
+  *::-webkit-scrollbar-thumb:hover { background: rgb(0 0 0 / 0.32); }
+  .dark *::-webkit-scrollbar-thumb { background: rgb(255 255 255 / 0.18); }
+  .dark *::-webkit-scrollbar-thumb:hover { background: rgb(255 255 255 / 0.32); }
+
+  /* 尊重减弱动效偏好 */
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer utilities {
+  /* 数字列对齐（统计/表格金额延迟等） */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 表格通用增强：行悬浮 + 数字对齐（shadcn Table data-slot 驱动，全站表格自动受益） */
+  [data-slot="table-row"] {
+    transition: background-color 150ms ease-out;
+  }
+  [data-slot="table-body"] [data-slot="table-row"]:hover {
+    background-color: color-mix(in oklab, var(--muted) 55%, transparent);
+  }
+  [data-slot="table-cell"], [data-slot="table-head"] {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 卡片悬浮轻微上浮（仅桌面指针） */
+  @media (hover: hover) {
+    [data-slot="card"] {
+      transition: box-shadow 200ms ease-out, border-color 200ms ease-out;
+    }
   }
 }

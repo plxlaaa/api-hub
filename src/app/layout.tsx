@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-import { Toaster } from "@/components/ui/toaster";
+import { ThemeProvider } from "@/components/theme-provider";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -14,32 +14,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AgentMore",
-  description: "Modern Next.js scaffold optimized for AI-powered development with AgentMore. Built with TypeScript, Tailwind CSS, and shadcn/ui.",
-  keywords: ["AgentMore", "Next.js", "TypeScript", "Tailwind CSS", "shadcn/ui", "AI development", "React"],
-  authors: [{ name: "AgentMore" }],
-  icons: {
-    icon: "https://new-front.chatglm.cn/activeimg/effective-web/69f17993283edbb6900dce9a",
-  },
-  openGraph: {
-    title: "AgentMore",
-    description: "AI-powered development with modern React stack",
-    url: "https://agentmore.chatglm.cn/",
-    siteName: "AgentMore",
-    type: "website",
-    images: [
-      {
-        url: "https://new-front.chatglm.cn/activeimg/effective-web/69f17993283edbb6900dce9a",
-        alt: "AgentMore Logo",
-      },
-    ],
-  },
-  twitter: {
-    card: "summary_large_image",
-    title: "AgentMore",
-    description: "AI-powered development with modern React stack",
-    images: ["https://new-front.chatglm.cn/activeimg/effective-web/69f17993283edbb6900dce9a"],
-  },
+  title: "API Hub · 个人网关",
+  description:
+    "聚合公益站 API：实时探测、渠道状态、自定义路由、模型改名、统一 URL 与 Key 调用。",
 };
 
 export default function RootLayout({
@@ -48,12 +25,11 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning>
+    <html lang="zh-CN" suppressHydrationWarning>
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-background text-foreground`}
       >
-        {children}
-        <Toaster />
+        <ThemeProvider>{children}</ThemeProvider>
       </body>
     </html>
   );

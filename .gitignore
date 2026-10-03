@@ -1,0 +1,9 @@
+node_modules/
+.next/
+.turbo/
+*.log
+db/custom.db
+db/custom.db-journal
+.env*.local
+.DS_Store
+tsconfig.tsbuildinfo
