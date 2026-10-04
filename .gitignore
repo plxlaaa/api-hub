@@ -4,8 +4,12 @@ node_modules/
 *.log
 db/custom.db
 db/custom.db-journal
+# SQLite WAL 模式的附属文件（-wal / -shm），漏掉会把不一致快照提交进仓库
+db/custom.db-wal
+db/custom.db-shm
 db/credentials.env
 db/setup-token.txt
+db/*.env
 .env*.local
 .DS_Store
 tsconfig.tsbuildinfo

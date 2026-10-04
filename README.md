@@ -14,24 +14,36 @@
 | 📊 运营数据 | 渠道横评（调用量/成功率/延迟/Token）、24h 探测可用率、密钥级用量统计、仪表盘 Top5 + 7d 趋势 |
 | 🔑 统一调用 | 客户端始终用 OpenAI 格式访问网关；密钥配额限制；流式 SSE 全支持 |
 | 🔐 管理安全 | 首次自设用户名+密码（scrypt 加盐哈希，明文不落盘）；一次性设置令牌防抢注；登录 5 次错锁 10 分钟；HttpOnly 会话 Cookie 防 XSS 窃取 |
+| 🛡️ 后端加固 | 客户端断开即中止上游请求（不白烧额度）；上游错误体密钥自动脱敏；渠道地址默认禁内网（防 SSRF）；统一 Key 限速 + 配额原子扣减；SQLite WAL + 忙等超时；熔断冷却期防抖动 |
 | 🌐 配套 | 公开模型广场（脱敏状态页）、明暗双主题、配置备份导出/导入 |
+| 📦 部署 | Linux 脚本 / Windows 脚本 / Docker Compose 三种装法；`node doctor.mjs` 环境自检 |
 
 ## 一键安装（推荐）
 
-仓库根目录带两个安装脚本，装完会注册成常驻服务并开机自启，不需要手工敲下面的步骤。
+三种装法，按环境挑一种。装完都是常驻服务 + 开机自启，不需要手工敲后续步骤。
 
-### Linux（Ubuntu / Debian / RHEL / Alpine / Arch / openSUSE）
+| 你的情况 | 用哪种 |
+|---------|--------|
+| Linux 服务器（有 systemd） | [方式一：install-api-hub.sh](#方式一linux-脚本安装) |
+| Windows 10/11 | [方式二：install-api-hub.ps1](#方式二windows-脚本安装) |
+| 不想在机器上装 Node / 没有 root / 容器环境 | [方式三：Docker](#方式三docker-一键部署) |
+
+> 三种方式都需要 GitHub PAT（私有仓库拉源码）。令牌只用于下载源码，脚本不会上传任何数据，
+> 别把它写进脚本或提交到仓库。
+
+### 方式一：Linux 脚本安装
 
 ```bash
-T=ghp_你的GitHub令牌       # 私有仓库需 PAT，勾选 repo
+T=ghp_你的GitHub令牌       # 私有仓库需PAT，勾选 repo
 curl -fsSL -H "Authorization: Bearer $T" -H "Accept: application/vnd.github.raw" \
   https://api.github.com/repos/plxlaaa/api-hub/contents/install-api-hub.sh \
   -o install-api-hub.sh
 bash install-api-hub.sh --token "$T" --domain hub.example.com
 ```
 
-`--domain` 可选，填了会自动装 Caddy 并签发 HTTPS 证书。脚本会：装 Node 20+ / bun → 拉取源码 →
-装依赖 → 生成 Prisma Client → 建库 → 构建 → 注册 systemd 服务 → 健康检查 → 打印首次设置令牌。
+覆盖 Ubuntu / Debian、RHEL / CentOS / Fedora、Alpine、Arch、openSUSE（自动探测包管理器）。
+脚本会：装 Node 20+ / bun → 拉源码 → 装依赖 → 生成 Prisma Client → 建库 → 构建 →
+注册 systemd 服务 `api-hub` → 健康检查 → 打印首次设置令牌。
 
 | 动作 | 命令 |
 |------|------|
@@ -42,9 +54,13 @@ bash install-api-hub.sh --token "$T" --domain hub.example.com
 | 卸载并删除数据库 | `bash install-api-hub.sh --uninstall --purge` |
 
 常用参数：`-d/--dir` 安装目录（默认 `/opt/api-hub`）、`-p/--port`（默认 3000）、
-`-b/--branch`（默认 main）、`--cn` 走 npmmirror 镜像。需要 systemd；容器内运行请自行 nohup。
+`-b/--branch`（默认 main）、`--domain` 自动装 Caddy 签 HTTPS、`--cn` 走 npmmirror 镜像、
+`--firewall` 自动放行端口。
 
-### Windows 10 / 11（管理员 PowerShell）
+**没有 systemd 的环境**（容器 / 精简镜像 / WSL）也能装：脚本会自动降级为
+`nohup` 常驻 + `crontab @reboot` 开机自启，并在日志里提示。更推荐直接用方式三。
+
+### 方式二：Windows 脚本安装
 
 ```powershell
 $env:GITHUB_TOKEN='ghp_你的GitHub令牌'
@@ -54,11 +70,32 @@ irm "https://api.github.com/repos/plxlaaa/api-hub/contents/install-api-hub.ps1" 
 .\install-api-hub.ps1 -Token $env:GITHUB_TOKEN
 ```
 
-默认注册**计划任务**（用户登录时自动启动）；要开机即启请先装
-[nssm](https://nssm.cc/) 再加 `-UseNssm` 注册为真正的 Windows 服务。
+默认注册**计划任务**（用户登录时自动启动）。装了 [nssm](https://nssm.cc/) 的话会被自动识别，
+直接注册为真正的 Windows 服务（开机即启，无需登录）；没装则用计划任务。
 `-Update` / `-Status` / `-Uninstall` / `-Precheck` 与 Linux 版对应。
 
-> 令牌只用来拉私有仓库源码，脚本不会上传任何数据。别把它写进脚本或提交到仓库。
+### 方式三：Docker 一键部署
+
+不想在宿主机装 Node/bun，或者机器上没有 root 权限时用这个。
+
+```bash
+git clone https://github.com/plxlaaa/api-hub.git && cd api-hub
+cp .env.example .env            # 可选：改端口 / 时区
+docker compose up -d --build
+docker compose logs -f         # 看首次设置令牌
+```
+
+数据库在具名卷 `api-hub-data` 里（容器重建不丢）。国内网络慢可加 `CN_MIRROR=1` 走镜像加速。
+
+| 动作 | 命令 |
+|------|------|
+| 查看状态 | `docker compose ps` |
+| 看日志 | `docker compose logs -f` |
+| 更新 | `git pull && docker compose up -d --build` |
+| 停止 | `docker compose down`（数据保留） |
+| 备份数据库 | `docker run --rm -v api-hub-data:/data -v $PWD:/backup alpine tar czf /backup/db-$(date +%F).tgz -C /data .` |
+
+也可以在 Linux 脚本里直接加 `--docker` 走同一套流程。
 
 ## 手动开始
 
@@ -66,16 +103,13 @@ irm "https://api.github.com/repos/plxlaaa/api-hub/contents/install-api-hub.ps1" 
 
 ```bash
 # 先跑环境自检
-node doctor.mjs
+node doctor.mjs              # 或 bun run doctor，加 --json 输出机器可读结果
 
 # 安装依赖
-bun install        # 或 npm install
+bun install                # 或 npm install
 
-# 初始化 Prisma Client（不要跑 db:reset，会清库）
-bun run db:generate
-
-# 启动
-bun run dev        # http://localhost:3000
+# 启动（首次启动会自动建表，无需手动 db:push）
+bun run dev                # http://localhost:3000
 ```
 
 首次进入面板会要求创建管理员账号：**用户名 + 密码 + 一次性设置令牌**。令牌在服务启动日志里打印，
@@ -86,13 +120,12 @@ bun run dev        # http://localhost:3000
 
 装完服务在哪：
 
-| 项 | 位置 |
-|------|------|
-| 安装目录 | Linux `/opt/api-hub` · Windows `C:\api-hub` |
-| 数据库 | `<安装目录>/db/custom.db`（明文 Key，勿外传） |
-| 服务名 | Linux `api-hub` · Windows 计划任务 `APIHub` |
-| 看日志 | `journalctl -u api-hub -f` |
-
+| 项 | Linux脚本 | Windows 脚本 | Docker |
+|------|-------|-----------|--------|
+| 安装目录 | `/opt/api-hub` | `C:\api-hub` | 镜像内`/app` |
+| 数据库 | `<目录>/db/custom.db` | `<目录>\db\custom.db` | 卷 `api-hub-data` |
+| 常驻方式 | systemd `api-hub` | 计划任务 `APIHub` 或 nssm 服务 | 容器 `restart: unless-stopped` |
+| 看日志 | `journalctl -u api-hub -f` | `Get-Content server.log -Tail 50` | `docker compose logs -f` |
 
 ## 统一调用示例
 
@@ -125,4 +158,16 @@ Next.js (App Router) · TypeScript · Prisma + SQLite · Tailwind CSS · shadcn/
 - 管理员密码以 scrypt 加盐哈希存于本机 `db/credentials.env`（权限 600，明文不落盘），同样勿提交/外传
 - 管理端已做服务器面板级防护：一次性设置令牌（防抢注）、登录 5 次错锁 10 分钟、HttpOnly 会话 Cookie
 - 面板若要暴露公网，**务必配 HTTPS**（域名 + 反向代理）；`公网IP:端口` 裸 HTTP 会让登录密码明文过网
+- 反向代理必须注入 `X-Real-IP`：登录防爆破只信任这个头，不注入的话客户端可自带该头伪造 IP 绕过锁定
+- 渠道 baseUrl 默认拒绝内网地址与云元数据地址（防 SSRF）；确需内网自建渠道，在该渠道 metadata 里加 `allowInternal: true`
+- 统一 Key 默认限速 60 次/分钟，可在密钥 metadata 里用 `rateLimitPerMin` 调整（0 = 不限）
 - 捐赠渠道的 Key 请仅用于个人额度，遵守各公益站规则
+
+## 开发
+
+```bash
+bun run typecheck   # tsc 类型检查
+bun run test        # 安全模块单测（Node 内置 runner，零依赖）
+bun run lint
+bun run doctor      # 环境自检
+```

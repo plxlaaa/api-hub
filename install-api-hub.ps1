@@ -17,6 +17,8 @@
     -Port     监听端口（默认 3000）
     -Branch   分支（默认 main）
     -CN       走国内镜像 npmmirror
+    -Docker   用 Docker 部署（不装本机 Node/bun，适合无管理员环境）
+    -NoFirewall  不自动放行防火墙端口
     -Purge    卸载时连数据库一起删
  ============================================================
 #>
@@ -28,6 +30,8 @@ param(
     [string]$Branch     = 'main',
     [switch]$CN,
     [switch]$UseNssm,
+    [switch]$Docker,
+    [switch]$NoFirewall,
     [switch]$Update,
     [switch]$Uninstall,
     [switch]$Purge,
@@ -48,20 +52,93 @@ function Step($m){ Write-Host ""; Write-Host "===== $m =====" -ForegroundColor C
 
 # ---------- 管理员权限 ----------
 function Assert-Admin {
+    # Docker 模式不需要管理员（只需 Docker Desktop 已启动）
+    if ($Docker -and -not ($Update -or $Uninstall -or $Precheck -or $Status)) {
+        Info "Docker 模式：跳过管理员检查"
+        return
+    }
     $id = [Security.Principal.WindowsIdentity]::GetCurrent()
     $p  = New-Object Security.Principal.WindowsPrincipal($id)
     if (-not $p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-        Die "请右键「以管理员身份运行」PowerShell 再执行本脚本"
+        Die "请右键「以管理员身份运行」PowerShell 再执行本脚本（Docker 模式可加 -Docker 免管理员）"
     }
+}
+
+# ---------- Docker 部署 ----------
+function Invoke-DockerDeploy {
+    Step "Docker 部署"
+    if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
+        Die "未安装 Docker Desktop。请从 https://www.docker.com/products/docker-desktop/ 安装后重试，
+或去掉 -Docker 走本机安装（需管理员 + Node 20+）"
+    }
+    try { docker info | Out-Null } catch {
+        Die "Docker 未运行。请先启动 Docker Desktop（托盘图标）后重试"
+    }
+    docker compose version | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Die "未找到 docker compose 插件。Docker Desktop 自带 compose，请升级到最新版"
+    }
+
+    Fetch-Source
+    Push-Location $Dir
+    if (-not (Test-Path 'docker-compose.yml')) { Pop-Location; Die "仓库中缺少 docker-compose.yml" }
+    # 写 .env 供 compose 插值
+    $cn = if ($CN) { '1' } else { '0' }
+    "PORT=$Port`nCN_MIRROR=$cn" | Set-Content -Path (Join-Path $Dir '.env') -Encoding UTF8
+
+    # 更新前备份数据库
+    $dbLocal = Join-Path $Dir 'db'
+    if (Test-Path $dbLocal) {
+        $bak = "C:\api-hub-backups\db-$(Get-Date -Format yyyyMMdd-HHmmss)"
+        New-Item -ItemType Directory -Path $bak -Force | Out-Null
+        Copy-Item -Path (Join-Path $dbLocal '*') -Destination $bak -Recurse -Force -ErrorAction SilentlyContinue
+        Ok "数据库已备份到 $bak"
+    }
+
+    docker compose up -d --build
+    if ($LASTEXITCODE -ne 0) { Pop-Location; Die "docker compose up 失败（见上方输出）" }
+    Pop-Location
+    Ok "容器已启动"
+    Wait-Healthy
+    Show-Summary
+    exit 0
+}
+
+function Wait-Healthy {
+    Step "启动并健康检查"
+    $i = 0
+    while ($i -lt 90) {
+        Start-Sleep -Seconds 1; $i++
+        try {
+            $r = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/" -UseBasicParsing -TimeoutSec 3
+            Ok "服务已就绪（${i}s，HTTP $($r.StatusCode)）：http://127.0.0.1:$Port"
+            return
+        } catch { }
+    }
+    Die "90s 内未通过健康检查。Docker 看日志：docker compose logs -f"
 }
 
 # ---------- 状态查看 ----------
 function Show-Status {
     Step "运行状态"
-    $p = Get-Process -Name node,bun -ErrorAction SilentlyContinue
-    if ($p) { Ok "发现运行中的进程：$($p.ProcessName -join ', ')" } else { Warn "未发现 node/bun 进程，服务可能未启动" }
+    # Docker 容器状态
+    if ((Test-Path (Join-Path $Dir 'docker-compose.yml')) -and (Get-Command docker -ErrorAction SilentlyContinue)) {
+        try {
+            Push-Location $Dir
+            docker compose ps
+            Pop-Location
+        } catch { }
+    }
+    $p = Get-Process -Name node,bun -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$Dir*" }
+    if ($p) { Ok "发现运行中的进程：PID $($p.Id -join ', ')" } else { Info "未发现本项目的 node/bun 进程" }
+
+    if (Get-Command nssm -ErrorAction SilentlyContinue) {
+        $ns = nssm status APIHub 2>$null
+        if ($ns) { Ok "nssm 服务状态：$ns" }
+    }
     $t = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    if ($t) { Ok "开机自启任务已注册，状态：$($t.State)" } else { Warn "未注册开机自启任务" }
+    if ($t) { Ok "开机自启任务已注册，状态：$($t.State)" } else { Info "未注册开机自启任务（若已用 nssm 注册为服务则属正常）" }
+
     $tok = Join-Path $Dir 'db\setup-token.txt'
     $cred = Join-Path $Dir 'db\credentials.env'
     if (Test-Path $tok) {
@@ -81,11 +158,21 @@ function Show-Status {
 # ---------- 卸载 ----------
 function Do-Uninstall {
     Step "卸载 $TaskName"
+    # Docker 容器
+    if ((Test-Path (Join-Path $Dir 'docker-compose.yml')) -and (Get-Command docker -ErrorAction SilentlyContinue)) {
+        Push-Location $Dir
+        docker compose down 2>$null | Out-Null
+        Pop-Location
+        Ok "Docker 容器已停止并移除"
+    }
+    # nssm 服务
+    if (Get-Command nssm -ErrorAction SilentlyContinue) {
+        nssm stop APIHub 2>$null | Out-Null
+        nssm remove APIHub confirm 2>$null | Out-Null
+    }
     Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
-    Get-Process -Name node,bun -ErrorAction SilentlyContinue | Where-Object {
-        $_.Path -like "$Dir*"
-    } | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+    Stop-AppProcess
     if ($Purge) {
         Remove-Item -Recurse -Force $Dir -ErrorAction SilentlyContinue
         Warn "已删除 $Dir（含数据库，不可恢复）"
@@ -230,14 +317,19 @@ function Build-App {
 # ---------- 启动脚本 ----------
 function Write-StartScript {
     $start = Join-Path $Dir 'start.ps1'
+    # 找 next CLI 的真实路径（不同包管理器布局不一致）
+    $nextBin = Join-Path $Dir 'node_modules\next\dist\bin\next'
+    if (-not (Test-Path $nextBin)) { $nextBin = Join-Path $Dir 'node_modules\.bin\next.cmd' }
     $content = @"
 `$ErrorActionPreference = 'SilentlyContinue'
 Set-Location '$Dir'
 `$env:NODE_ENV = 'production'
 `$env:PORT = '$Port'
+`$env:HOSTNAME = '0.0.0.0'
 `$env:NEXT_TELEMETRY_DISABLED = '1'
 # 工作目录必须是项目根：Prisma 与凭据文件都按 cwd 定位 db\
-& bun '$Dir\node_modules\next\dist\bin\next' start -p $Port
+# 日志重定向到 server.log，便于 tail 排查
+& bun '$nextBin' start -p $Port *>> '$Dir\server.log'
 "@
     Set-Content -Path $start -Value $content -Encoding UTF8
     Ok "启动脚本已生成：$start"
@@ -245,8 +337,7 @@ Set-Location '$Dir'
 
 function Start-App {
     Step "启动服务"
-    Get-Process -Name node,bun -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$Dir*" } |
-        ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+    Stop-AppProcess
     Start-Sleep -Seconds 2
     Start-Process -FilePath 'powershell.exe' `
         -ArgumentList "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Dir\start.ps1`"" `
@@ -260,26 +351,44 @@ function Start-App {
             return
         } catch { }
     }
-    Die "60s 内未通过健康检查。直接前台跑看报错：cd $Dir; bun run start"
+    Die "60s 内未通过健康检查。看日志：Get-Content '$Dir\server.log' -Tail 100
+或前台跑看报错：cd $Dir; bun run start"
+}
+
+# 停掉本项目进程（按 Path 前缀精确匹配，不误杀其他 node 进程）
+function Stop-AppProcess {
+    Get-Process -Name node,bun -ErrorAction SilentlyContinue | Where-Object {
+        $_.Path -like "$Dir*"
+    } | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
 }
 
 # ---------- 开机自启 ----------
 function Enable-Autostart {
     Step "配置开机自启"
-    if ($UseNssm) {
-        $nssm = Get-Command nssm -ErrorAction SilentlyContinue
+    # nssm 可用时默认就注册为真正的 Windows 服务（开机即启，不依赖用户登录）
+    $nssm = Get-Command nssm -ErrorAction SilentlyContinue
+    $useNssm = $UseNssm -or [bool]$nssm
+
+    if ($useNssm) {
         if (-not $nssm) {
-            Warn "未找到 nssm。下载 https://nssm.cc/release/nssm-2.24.zip 并把 nssm.exe 放进 PATH，或去掉 -UseNssm 改用计划任务"
-            Info "回退到计划任务方案"
+            Warn "指定了 -UseNssm 但未找到 nssm。下载 https://nssm.cc/release/nssm-2.24.zip 把 nssm.exe 放进 PATH，或去掉 -UseNssm 用计划任务"
         } else {
+            & nssm stop APIHub 2>$null | Out-Null
+            & nssm remove APIHub confirm 2>$null | Out-Null
             & nssm install APIHub powershell.exe "-NoProfile -ExecutionPolicy Bypass -File `"$Dir\start.ps1`""
             & nssm set APIHub AppDirectory $Dir
             & nssm set APIHub DisplayName "API Hub"
+            & nssm set APIHub Start SERVICE_AUTO_START
+            # 崩溃自动重启，比计划任务恢复更及时
+            & nssm set APIHub AppExit Default Restart
+            & nssm set APIHub AppRestartDelay 5000
             & nssm start APIHub
-            Ok "已注册为 Windows 服务（nssm）：nssm status APIHub"
+            Ok "已注册为 Windows 服务（nssm）：开机自动启动，无需登录"
+            Info "管理：nssm status APIHub / nssm restart APIHub / nssm stop APIHub"
             return
         }
     }
+
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
     $act = New-ScheduledTaskAction -Execute 'powershell.exe' `
         -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$Dir\start.ps1`""
@@ -288,19 +397,29 @@ function Enable-Autostart {
     Register-ScheduledTask -TaskName $TaskName -Action $act -Trigger $trg -Settings $set `
         -RunLevel Highest -Force | Out-Null
     Ok "已注册计划任务「$TaskName」（登录时自动启动）"
-    Warn "计划任务需用户登录才触发；要开机即启请装 nssm 后重跑并加 -UseNssm"
+    Warn "计划任务需用户登录才触发；要开机即启请装 nssm（nssm.cc）后重跑，会自动改用服务方式"
 }
 
 # ---------- 防火墙 ----------
 function Open-Firewall {
     Step "放行端口 $Port"
+    if ($NoFirewall) { Info "已指定 -NoFirewall，跳过"; return }
     $ruleName = "API Hub $Port"
     if (-not (Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue)) {
+        # 只放行专用网与域配置，避免直接暴露到公网（管理台含明文 API Key）
         New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Protocol TCP `
-            -LocalPort $Port -Action Allow -Profile Any | Out-Null
-        Ok "已放行 TCP $Port 入站"
+            -LocalPort $Port -Action Allow -Profile Domain,Private -ErrorAction SilentlyContinue | Out-Null
+        if ($?) {
+            Ok "已放行 TCP $Port 入站（仅域/专用网）"
+        } else {
+            # 老系统或权限不足时退回全配置
+            New-NetFirewallRule -DisplayName $ruleName -Direction Inbound -Protocol TCP `
+                -LocalPort $Port -Action Allow -Profile Any | Out-Null
+            Warn "已放行 TCP $Port（所有配置）"
+        }
     } else { Ok "防火墙规则已存在" }
-    Warn "若只在本机访问（如 AstrBot 同机），建议不暴露公网：可在防火墙里删除此规则"
+    Warn "管理台含明文 API Key：仅在本机/内网使用时建议在防火墙里删除此规则，不要暴露公网"
+    Warn "确需公网访问请用域名 + HTTPS 反代（Caddy/Nginx），裸 IP:端口 登录密码会明文过网"
 }
 
 # ---------- 收尾 ----------
@@ -339,8 +458,19 @@ Assert-Admin
 if ($Status)   { Show-Status }
 if ($Uninstall){ Do-Uninstall }
 
+# Docker 模式：不需要本机 Node/bun，流程完全不同
+if ($Docker -and (-not ($Precheck))) {
+    Invoke-DockerDeploy
+    exit 0
+}
+
 Preflight
-if ($Precheck) { Install-Node; Install-Bun; Ok "环境自检通过，可以安装"; exit 0 }
+if ($Precheck) {
+    if ($Docker) { Info "Docker 模式自检"; try { docker info | Out-Null; Ok "Docker 运行中" } catch { Die "Docker 未运行" } }
+    Install-Node; Install-Bun
+    Ok "环境自检通过，可以安装"
+    exit 0
+}
 
 Install-Node
 Install-Bun

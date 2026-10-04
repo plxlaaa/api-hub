@@ -1,0 +1,48 @@
+# ============================================================
+#  API Hub 容器编排
+#  用法：
+#    cp .env.example .env   # 可选，改端口
+#    docker compose up -d --build
+#    docker compose logs -f
+#    docker compose down     # 停止（数据保留在具名卷里）
+#  数据持久化：db/ 目录以具名卷 api-hub-data 挂到 /app/db
+#  ⚠️ 该目录含明文 API Key 与管理员凭据，勿提交进仓库、勿外传
+# ============================================================
+services:
+  api-hub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # 国内机器设为 1，走 npmmirror 加速（等价于安装脚本的 --cn）
+        CN_MIRROR: "${CN_MIRROR:-0}"
+    image: api-hub:latest
+    container_name: api-hub
+    restart: unless-stopped
+    ports:
+      # 左侧为主机端口：只在宿主机暴露，容器间通信用服务名
+      - "${PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      NEXT_TELEMETRY_DISABLED: "1"
+      PORT: "3000"
+      HOSTNAME: "0.0.0.0"
+      TZ: "${TZ:-Asia/Shanghai}"
+    volumes:
+      # SQLite 库 + 凭据 + 一次性设置令牌，都在这个卷里
+      - api-hub-data:/app/db
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/auth/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  api-hub-data:
+    name: api-hub-data
