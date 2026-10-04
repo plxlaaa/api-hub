@@ -3,6 +3,8 @@ import { requireAdmin } from '@/lib/auth'
 import { normalizeBaseUrl } from '@/lib/probe'
 import { parseApiFormat } from '@/lib/adapters'
 import { parseMetadata } from '@/lib/metadata'
+import { parseStringArray } from '@/lib/json-field'
+import { checkUpstreamUrl, allowsInternalUrl } from '@/lib/url-safety'
 
 export const dynamic = 'force-dynamic'
 
@@ -65,7 +67,7 @@ export async function GET(req: Request) {
       return {
         ...c,
         apiFormat: parseApiFormat(c.apiFormat),
-        models: JSON.parse(c.models || '[]') as string[],
+        models: parseStringArray(c.models),
         hasKey: true,
         stats: s
           ? { calls: s.calls, ok: s.ok, tokens: s.tokens, avgLatencyMs: s.latN > 0 ? Math.round(s.latSum / s.latN) : null }
@@ -84,16 +86,16 @@ export async function POST(req: Request) {
 
   const { name, baseUrl, apiKey, models, remark, enabled, apiFormat, metadata } = body as Record<string, unknown>
   if (typeof name !== 'string' || !name.trim()) return Response.json({ error: '渠道名称必填' }, { status: 400 })
-  if (typeof baseUrl !== 'string' || !normalizeBaseUrl(baseUrl.trim()).match(/^https?:\/\//)) {
-    return Response.json({ error: 'Base URL 必须是有效地址（自动补全 https:// 前缀）' }, { status: 400 })
-  }
+  // SSRF 校验：baseUrl 会被服务端主动 fetch，内网/元数据地址默认拒绝
+  const checkedUrl = checkUpstreamUrl(String(baseUrl ?? ''), allowsInternalUrl(metadata) || allowsInternalUrl(remark))
+  if (!checkedUrl.ok) return Response.json({ error: checkedUrl.reason }, { status: 400 })
   if (typeof apiKey !== 'string' || !apiKey.trim()) return Response.json({ error: 'API Key 必填' }, { status: 400 })
 
   const m = parseMetadata(metadata)
   const ch = await db.channel.create({
     data: {
       name: name.trim(),
-      baseUrl: normalizeBaseUrl(baseUrl),
+      baseUrl: checkedUrl.url,
       apiKey: apiKey.trim(),
       apiFormat: parseApiFormat(apiFormat),
       models: JSON.stringify(parseModels(models)),

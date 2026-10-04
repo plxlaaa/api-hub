@@ -38,14 +38,26 @@ const weightedStrategy: StrategyFn = (candidates) => {
   const ordered: Candidate[] = []
   while (pool.length > 0) {
     const total = pool.reduce((s, x) => s + (x.cfg.weight ?? 1), 0)
+    // 权重全为 0（或全非法）时 total=0，除法会得到 NaN 并恒取 idx=0 —— 退化为顺序追加
+    if (!Number.isFinite(total) || total <= 0) {
+      ordered.push(...pool)
+      break
+    }
     let pick = Math.random() * total
     let idx = pool.length - 1
     for (let i = 0; i < pool.length; i++) {
-      pick -= pool[i].cfg.weight ?? 1
-      if (pick <= 0) {
+      const w = pool[i].cfg.weight ?? 1
+      pick -= w
+      // pick<=0 会误中 weight=0 的项（它们本不该被抽中），故跳过并继续扣减
+      if (pick <= 0 && w > 0) {
         idx = i
         break
       }
+    }
+    // 本轮所有候选权重都为 0 → 直接按剩余顺序追加，避免死循环
+    if (pool.every((x) => (x.cfg.weight ?? 1) <= 0)) {
+      ordered.push(...pool)
+      break
     }
     ordered.push(pool.splice(idx, 1)[0])
   }
@@ -64,26 +76,43 @@ const speedStrategy: StrategyFn = (candidates) =>
 const qualityStrategy: StrategyFn = (candidates) =>
   [...candidates].sort((a, b) => (b.cfg.quality ?? 5) - (a.cfg.quality ?? 5))
 
-/** 稳定性优先：近 7 天调用成功率降序（无记录 0.5），同率按延迟升序 */
+/**
+ * 稳定性优先：近 7 天调用成功率降序（无记录 0.5），同率按延迟升序。
+ *
+ * 性能：这是网关热路径（每个请求都会调用），原本每次都做一次 7 天 groupBy 全表聚合。
+ * 这里加 60s 内存缓存 —— 成功率是缓慢变化的统计量，60s 延迟对排序结果无感知影响，
+ * 但把每请求一次聚合查询降到每分钟一次。
+ */
+const STABILITY_CACHE_TTL_MS = 60_000
+let stabilityCache: { at: number; rates: Map<string, number> } | null = null
+
 const stabilityStrategy: StrategyFn = async (candidates) => {
-  const since = new Date(Date.now() - 7 * 24 * 3600_000)
-  const grouped = await db.requestLog.groupBy({
-    by: ['channelName', 'ok'],
-    where: { createdAt: { gte: since }, channelName: { in: candidates.map((x) => x.ch.name) } },
-    _count: { _all: true },
-  })
-  const stats = new Map<string, { ok: number; total: number }>()
-  for (const g of grouped) {
-    const s = stats.get(g.channelName) || { ok: 0, total: 0 }
-    s.total += g._count._all
-    if (g.ok) s.ok += g._count._all
-    stats.set(g.channelName, s)
-  }
-  return [...candidates].sort((a, b) => {
-    const rate = (name: string) => {
-      const s = stats.get(name)
-      return s && s.total > 0 ? s.ok / s.total : 0.5
+  const now = Date.now()
+  let rates: Map<string, number>
+  if (stabilityCache && now - stabilityCache.at < STABILITY_CACHE_TTL_MS) {
+    rates = stabilityCache.rates
+  } else {
+    const since = new Date(now - 7 * 24 * 3600_000)
+    const grouped = await db.requestLog.groupBy({
+      by: ['channelName', 'ok'],
+      where: { createdAt: { gte: since }, channelName: { in: candidates.map((x) => x.ch.name) } },
+      _count: { _all: true },
+    })
+    const stats = new Map<string, { ok: number; total: number }>()
+    for (const g of grouped) {
+      const s = stats.get(g.channelName) || { ok: 0, total: 0 }
+      s.total += g._count._all
+      if (g.ok) s.ok += g._count._all
+      stats.set(g.channelName, s)
     }
+    rates = new Map<string, number>()
+    for (const [name, s] of stats) {
+      rates.set(name, s.total > 0 ? s.ok / s.total : 0.5)
+    }
+    stabilityCache = { at: now, rates }
+  }
+  const rate = (name: string) => rates.get(name) ?? 0.5
+  return [...candidates].sort((a, b) => {
     const ra = rate(a.ch.name)
     const rb = rate(b.ch.name)
     if (ra !== rb) return rb - ra
@@ -91,6 +120,11 @@ const stabilityStrategy: StrategyFn = async (candidates) => {
     const lb = b.ch.latencyMs ?? Number.MAX_SAFE_INTEGER
     return la === lb ? 0 : la - lb
   })
+}
+
+/** 主动失效稳定性缓存（调用日志写入后无需调用，此函数供测试/管理操作使用） */
+export function invalidateStabilityCache(): void {
+  stabilityCache = null
 }
 
 /** 优先级：配置顺序即尝试顺序 */

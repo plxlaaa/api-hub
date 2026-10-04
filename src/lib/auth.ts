@@ -2,6 +2,7 @@ import { SignJWT, jwtVerify } from 'jose'
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
 import { db } from '@/lib/db'
 import { loadCredentials, saveCredentials } from '@/lib/credentials'
+import { checkRateLimit, hitRateLimit, resetRateLimit } from '@/lib/rate-limit'
 
 const SETTING_JWT_SECRET = 'jwtSecret'
 const TOKEN_EXPIRES = '30d'
@@ -130,7 +131,9 @@ export async function requireAdmin(req: Request): Promise<Response | null> {
   const token = tokenFromRequest(req)
   if (!token) return unauthorized()
   try {
-    await jwtVerify(token, await getJwtSecret())
+    // 显式限定算法：不给 algorithms 时 jwtVerify 会按 token 头里的 alg 尝试验签，
+    // 存在算法混淆风险（如 alg=none 或非对称算法误配）
+    await jwtVerify(token, await getJwtSecret(), { algorithms: ['HS256'] })
     return null
   } catch {
     return unauthorized()
@@ -152,41 +155,28 @@ export async function setupAdmin(username: string, password: string): Promise<st
 
 const LOCK_THRESHOLD = 5
 const LOCK_WINDOW_MS = 10 * 60_000
-const loginAttempts = new Map<string, { count: number; firstAt: number; lockedUntil: number }>()
 
 function clientKey(req: Request): string {
-  const fwd = req.headers.get('x-forwarded-for') || ''
-  return (fwd.split(',')[0].trim() || req.headers.get('x-real-ip') || 'local').slice(0, 64)
+  // 只信 x-real-ip（反向代理覆盖写入，客户端无法伪造）。
+  // 刻意不信任 x-forwarded-for：任何人都能自带该头，随意改首段 IP 即可绕过锁定，
+  // 限流就形同虚设。Caddyfile 已配置 header_up X-Real-IP {remote_host}。
+  const realIp = req.headers.get('x-real-ip') || ''
+  return (realIp.split(',')[0].trim() || req.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || 'local').slice(0, 64)
 }
 
 /** 检查该 IP 是否被锁定；返回剩余秒数（0 = 未锁定） */
 export function loginLockRemaining(req: Request): number {
-  const rec = loginAttempts.get(clientKey(req))
-  if (!rec) return 0
-  if (rec.lockedUntil > Date.now()) return Math.ceil((rec.lockedUntil - Date.now()) / 1000)
-  return 0
+  const r = checkRateLimit(`login:${clientKey(req)}`, { windowMs: LOCK_WINDOW_MS, max: LOCK_THRESHOLD })
+  return r.ok ? 0 : Math.ceil(r.retryAfterMs / 1000)
 }
 
 export function recordLoginFailure(req: Request): void {
-  const key = clientKey(req)
-  const now = Date.now()
-  const rec = loginAttempts.get(key)
-  if (!rec || now - rec.firstAt > LOCK_WINDOW_MS) {
-    loginAttempts.set(key, { count: 1, firstAt: now, lockedUntil: 0 })
-    return
-  }
-  rec.count++
-  if (rec.count >= LOCK_THRESHOLD) rec.lockedUntil = now + LOCK_WINDOW_MS
-  // 顺手清理过期记录，防止 Map 无限增长
-  if (loginAttempts.size > 1000) {
-    for (const [k, v] of loginAttempts) {
-      if (now - v.firstAt > LOCK_WINDOW_MS && v.lockedUntil < now) loginAttempts.delete(k)
-    }
-  }
+  // 滑动窗口：窗口内第 5 次失败即触发锁定，无需额外维护计数器
+  hitRateLimit(`login:${clientKey(req)}`, { windowMs: LOCK_WINDOW_MS, max: LOCK_THRESHOLD })
 }
 
 export function recordLoginSuccess(req: Request): void {
-  loginAttempts.delete(clientKey(req))
+  resetRateLimit(`login:${clientKey(req)}`)
 }
 
 export async function loginAdmin(

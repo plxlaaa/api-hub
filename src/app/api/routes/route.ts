@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { requireAdmin } from '@/lib/auth'
 import { normalizeChannelConfigs, normalizeStrategy, parseChannelConfigs } from '@/lib/route-config'
 import { parseMetadata } from '@/lib/metadata'
+import { parseStringArray } from '@/lib/json-field'
 
 export const dynamic = 'force-dynamic'
 
@@ -44,7 +45,7 @@ export async function GET(req: Request) {
         id: r.id,
         displayName: r.displayName,
         targetModel: r.targetModel,
-        channelIds: JSON.parse(r.channelIds || '[]') as string[],
+        channelIds: parseStringArray(r.channelIds),
         channelConfigs: parseChannelConfigs(r),
         strategy: r.strategy,
         priceIn: r.priceIn,

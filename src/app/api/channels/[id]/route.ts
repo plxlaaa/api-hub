@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { isApiFormat } from '@/lib/adapters'
 import { requireAdmin } from '@/lib/auth'
 import { normalizeBaseUrl } from '@/lib/probe'
+import { checkUpstreamUrl, allowsInternalUrl } from '@/lib/url-safety'
 
 export const dynamic = 'force-dynamic'
 
@@ -26,11 +27,12 @@ export async function PUT(req: Request, { params }: Params) {
   const data: Record<string, unknown> = {}
   if (typeof body.name === 'string' && body.name.trim()) data.name = body.name.trim()
   if (typeof body.baseUrl === 'string') {
-    const nb = normalizeBaseUrl(body.baseUrl)
-    if (!nb.match(/^https?:\/\//)) {
-      return Response.json({ error: 'Base URL 必须是有效地址（自动补全 https:// 前缀）' }, { status: 400 })
-    }
-    data.baseUrl = nb
+    // SSRF 校验：allowInternal 取「本次提交或已存」的 metadata，避免误伤内网自建渠道
+    const allowInternal =
+      allowsInternalUrl(body.metadata) || allowsInternalUrl(body.remark) || allowsInternalUrl(ch.metadata)
+    const checked = checkUpstreamUrl(body.baseUrl, allowInternal)
+    if (!checked.ok) return Response.json({ error: checked.reason }, { status: 400 })
+    data.baseUrl = checked.url
   }
   if (typeof body.apiKey === 'string' && body.apiKey.trim()) data.apiKey = body.apiKey.trim()
   if (isApiFormat(body.apiFormat)) data.apiFormat = body.apiFormat

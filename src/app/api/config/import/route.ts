@@ -1,6 +1,7 @@
 import { db } from '@/lib/db'
 import { requireAdmin } from '@/lib/auth'
 import { normalizeStrategy } from '@/lib/route-order'
+import { parseApiFormat } from '@/lib/adapters'
 
 export const dynamic = 'force-dynamic'
 
@@ -42,7 +43,7 @@ export async function POST(req: Request) {
         name,
         baseUrl: String(c.baseUrl).trim(),
         apiKey: typeof c.apiKey === 'string' ? c.apiKey : '',
-        apiFormat: c.apiFormat === 'anthropic' ? 'anthropic' : 'openai',
+        apiFormat: parseApiFormat(c.apiFormat),
         models: JSON.stringify(Array.isArray(c.models) ? c.models.filter((m: unknown) => typeof m === 'string') : []),
         enabled: c.enabled !== false,
         remark: typeof c.remark === 'string' && c.remark.trim() ? c.remark.trim() : null,

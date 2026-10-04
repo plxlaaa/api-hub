@@ -1,9 +1,19 @@
 import { db } from '@/lib/db'
 import { getAdapter, resolveChatEndpoint } from '@/lib/adapters'
+import { redactSecrets } from '@/lib/redact'
+import { parseStringArray } from '@/lib/json-field'
 
 export const PROBE_INTERVAL_MS = 60_000
 const PROBE_TIMEOUT_MS = 10_000
 const MAX_LOGS = 1000
+/** 全量探测时的并发上限：SQLite 单写者，并发过高只会互相 SQLITE_BUSY */
+const PROBE_CONCURRENCY = 4
+/**
+ * 熔断恢复冷却期：熔断后至少等这么久才允许探测把渠道加回来。
+ * 没有冷却时会出现「上游抽风 → 网关熔断 → 探测成功 → 立刻加回 → 再熔断」的抖动，
+ * 渠道在候选列表里反复进出，调用方频繁感知到失败转移。
+ */
+const BREAKER_RECOVER_COOLDOWN_MS = 5 * 60_000
 
 /**
  * 规范化上游 URL：填到域名或 /v1 均可。
@@ -97,9 +107,12 @@ export async function probeUpstream(baseUrl: string, apiKey: string, apiFormat?:
 
   const latencyMs = Date.now() - start
   if (ok && res) {
+    // 探测只需要状态码；body 必须消费或取消，否则每个渠道每分钟泄漏一个 socket
+    void res.body?.cancel().catch(() => {})
     return { ok: true, latencyMs, statusCode: res.status, error: null, fixedBaseUrl }
   }
-  const text = res ? (await res.text().catch(() => '')).slice(0, 300) : ''
+  const text = res ? redactSecrets(await res.text().catch(() => ''), 300) : ''
+  void res?.body?.cancel().catch(() => {})
   return { ok: false, latencyMs, statusCode: res?.status ?? null, error: text || error || '探测失败' }
 }
 
@@ -121,7 +134,14 @@ export async function probeChannelById(channelId: string): Promise<ProbeResult> 
   const breakerEnabled = cbOn?.value !== 'off' // 默认开启
   const threshold = Math.max(1, Number(cbThreshold?.value ?? 3) || 3)
 
-  const failStreak = result.ok ? 0 : ch.failStreak + 1
+  // failStreak 用原子自增，不用 ch.failStreak + 1 的陈旧读绝对值回写，
+  // 否则会覆盖网关侧 recordForwardFailure 的 increment，导致失败计数丢失、熔断永不触发。
+  const streakRow = await db.channel.update({
+    where: { id: channelId },
+    data: { failStreak: result.ok ? 0 : { increment: 1 } },
+    select: { failStreak: true },
+  })
+  const failStreak = streakRow.failStreak
   let autoDisabled = ch.autoDisabled
   let autoDisabledAt = ch.autoDisabledAt
 
@@ -131,23 +151,48 @@ export async function probeChannelById(channelId: string): Promise<ProbeResult> 
     await db.channel.update({ where: { id: channelId }, data: { baseUrl: result.fixedBaseUrl } })
     fixedNote = `已自动补全 baseUrl：${ch.baseUrl} → ${result.fixedBaseUrl}`
     console.log(`[probe] 渠道「${ch.name}」${fixedNote}`)
-    result.fixedBaseUrl = result.fixedBaseUrl
   }
 
   if (breakerEnabled) {
     if (result.ok && ch.autoDisabled) {
-      // 恢复：探测成功，自动加回
-      autoDisabled = false
-      autoDisabledAt = null
-      console.log(`[probe] 渠道「${ch.name}」探测恢复，自动重新启用`)
+      // 恢复：需满足冷却期，避免熔断在「探测成功 ↔ 调用失败」之间反复抖动
+      const since = ch.autoDisabledAt ? Date.now() - ch.autoDisabledAt.getTime() : Infinity
+      if (since >= BREAKER_RECOVER_COOLDOWN_MS) {
+        // 条件更新：仅当仍处于熔断态才加回，与网关侧摘除操作互斥
+        const r = await db.channel
+          .updateMany({
+            where: { id: channelId, autoDisabled: true },
+            data: { autoDisabled: false, autoDisabledAt: null },
+          })
+          .catch(() => ({ count: 0 }))
+        if (r.count > 0) {
+          autoDisabled = false
+          autoDisabledAt = null
+          console.log(`[probe] 渠道「${ch.name}」探测恢复，自动重新启用`)
+        }
+      } else {
+        console.log(
+          `[probe] 渠道「${ch.name}」探测已恢复，但仍在熔断冷却期（${Math.ceil((BREAKER_RECOVER_COOLDOWN_MS - since) / 1000)}s 后再评估）`
+        )
+      }
     } else if (!result.ok && !ch.autoDisabled && failStreak >= threshold) {
-      // 熔断：连续失败达到阈值，自动摘除
-      autoDisabled = true
-      autoDisabledAt = new Date()
-      console.warn(`[probe] 渠道「${ch.name}」连续失败 ${failStreak} 次，自动熔断摘除`)
+      // 熔断：连续失败达到阈值，自动摘除（条件更新防并发重复摘除）
+      const r = await db.channel
+        .updateMany({
+          where: { id: channelId, autoDisabled: false },
+          data: { autoDisabled: true, autoDisabledAt: new Date() },
+        })
+        .catch(() => ({ count: 0 }))
+      if (r.count > 0) {
+        autoDisabled = true
+        autoDisabledAt = new Date()
+        console.warn(`[probe] 渠道「${ch.name}」连续失败 ${failStreak} 次，自动熔断摘除`)
+      }
     }
   }
 
+  // autoDisabled/autoDisabledAt 已在上面条件更新里落库，这里只同步 status/延迟等探测结果；
+  // 避免用陈旧的 autoDisabled 值把并发发生的熔断状态覆盖回去。
   await db.channel.update({
     where: { id: channelId },
     data: {
@@ -155,9 +200,6 @@ export async function probeChannelById(channelId: string): Promise<ProbeResult> 
       latencyMs: result.latencyMs,
       lastCheckAt: new Date(),
       lastError: result.ok ? null : result.error,
-      failStreak,
-      autoDisabled,
-      autoDisabledAt,
     },
   })
   await db.probeLog.create({
@@ -176,7 +218,18 @@ export async function probeChannelById(channelId: string): Promise<ProbeResult> 
 export async function probeAllChannels(): Promise<void> {
   try {
     const channels = await db.channel.findMany({ where: { enabled: true }, select: { id: true } })
-    await Promise.allSettled(channels.map((c) => probeChannelById(c.id)))
+    // 分批并发：SQLite 写并发受限，全量 Promise.allSettled 会互相 SQLITE_BUSY
+    const queue = [...channels]
+    const workers = Array.from({ length: Math.min(PROBE_CONCURRENCY, queue.length) }, async () => {
+      for (;;) {
+        const item = queue.shift()
+        if (!item) return
+        await probeChannelById(item.id).catch((err) => {
+          console.error(`[probe] 渠道 ${item.id} 探测异常:`, err instanceof Error ? err.message : err)
+        })
+      }
+    })
+    await Promise.all(workers)
     const count = await db.probeLog.count()
     if (count > MAX_LOGS) {
       const stale = await db.probeLog.findMany({
@@ -220,12 +273,7 @@ export async function testChannelChat(channelId: string, model?: string): Promis
   const ch = await db.channel.findUnique({ where: { id: channelId } })
   if (!ch) throw new Error('渠道不存在')
 
-  let models: string[] = []
-  try {
-    models = JSON.parse(ch.models || '[]')
-  } catch {
-    /* ignore */
-  }
+  const models = parseStringArray(ch.models)
   const target = (model?.trim() || models[0] || '').trim()
   if (!target) {
     return { ok: false, model: null, latencyMs: null, reply: null, totalTokens: null, error: '渠道未配置支持模型，请先在渠道设置中填写' }
@@ -244,8 +292,8 @@ export async function testChannelChat(channelId: string, model?: string): Promis
     })
     const latencyMs = Date.now() - start
     if (!res.ok) {
-      const text = (await res.text().catch(() => '')).slice(0, 200)
-      return { ok: false, model: target, latencyMs, reply: null, totalTokens: null, error: `HTTP ${res.status} ${text}` }
+      const text = redactSecrets(await res.text().catch(() => ''), 200)
+      return { ok: false, model: target, latencyMs, reply: null, totalTokens: null, error: `HTTP ${res.status}${text ? ` ${text}` : ''}` }
     }
     const j = (await res.json().catch(() => ({}))) as unknown
     const reply = adapter.extractReply(j)
@@ -253,8 +301,8 @@ export async function testChannelChat(channelId: string, model?: string): Promis
     return { ok: true, model: target, latencyMs, reply, totalTokens, error: null }
   } catch (err) {
     const msg = err instanceof Error
-      ? (err.name === 'TimeoutError' ? `对话测试超时（${CHAT_TEST_TIMEOUT_MS / 1000}s）` : err.message)
-      : String(err)
+      ? (err.name === 'TimeoutError' ? `对话测试超时（${CHAT_TEST_TIMEOUT_MS / 1000}s）` : redactSecrets(err.message, 200))
+      : redactSecrets(err, 200)
     return { ok: false, model: target, latencyMs: Date.now() - start, reply: null, totalTokens: null, error: msg }
   }
 }

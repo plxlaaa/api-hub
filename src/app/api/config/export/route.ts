@@ -1,6 +1,8 @@
 import { db } from '@/lib/db'
 import { requireAdmin } from '@/lib/auth'
 import { parseChannelConfigs } from '@/lib/route-config'
+import { parseApiFormat } from '@/lib/adapters'
+import { parseStringArray } from '@/lib/json-field'
 
 export const dynamic = 'force-dynamic'
 
@@ -30,8 +32,10 @@ export async function GET(req: Request) {
       channels: channels.map((c) => ({
         name: c.name,
         baseUrl: c.baseUrl,
-        apiFormat: c.apiFormat === 'anthropic' ? 'anthropic' : 'openai',
-        models: JSON.parse(c.models || '[]'),
+        // 用 parseApiFormat 而非手写三元：手写会把 gemini 错标成 openai，
+        // 导致「导出→导入」往返后 Gemini 渠道协议丢失
+        apiFormat: parseApiFormat(c.apiFormat),
+        models: parseStringArray(c.models),
         enabled: c.enabled,
         remark: c.remark,
         apiKey: withKeys ? c.apiKey : '',

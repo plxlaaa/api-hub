@@ -4,9 +4,15 @@ import { parseChannelConfigs, type ChannelConfig } from '@/lib/route-config'
 import { orderCandidates, type RouteStrategy } from '@/lib/route-order'
 import type { OpenAIBody } from '@/lib/anthropic'
 import { getAdapter, resolveChatEndpoint } from '@/lib/adapters'
+import { redactSecrets } from '@/lib/redact'
+import { hitRateLimit } from '@/lib/rate-limit'
 
 const UPSTREAM_TIMEOUT_MS = 300_000 // 长回答 / 长流式给足时间
 const MAX_REQUEST_LOGS = 2000
+/** 请求体大小上限：聊天请求正常在百 KB 级，10MB 足够宽松又能挡住超大 body 打内存 */
+const MAX_BODY_BYTES = 10 * 1024 * 1024
+/** 单把统一 Key 的默认限速（次/分钟）。可在 metadata.rateLimitPerMin 单独覆盖，0 = 不限 */
+const DEFAULT_RATE_LIMIT_PER_MIN = 60
 
 interface UpstreamBody {
   [key: string]: unknown
@@ -14,8 +20,8 @@ interface UpstreamBody {
   stream?: boolean
 }
 
-function openAiError(message: string, type: string, status: number): Response {
-  return Response.json({ error: { message, type, code: null } }, { status })
+function openAiError(message: string, type: string, status: number, headers?: Record<string, string>): Response {
+  return Response.json({ error: { message, type, code: null } }, { status, headers })
 }
 
 /** 转发失败联动熔断：真实调用连续失败达到阈值 → 自动摘除（探测恢复后自动加回） */
@@ -26,17 +32,21 @@ async function recordForwardFailure(channelId: string, errorMsg: string): Promis
       db.setting.findUnique({ where: { key: 'cbThreshold' } }),
     ])
     if (cbOn?.value === 'off') return
+    // 原子自增，避免与探测侧的陈旧读-绝对值回写互相覆盖
     const updated = await db.channel.update({
       where: { id: channelId },
-      data: { failStreak: { increment: 1 }, status: 'offline', lastError: errorMsg.slice(0, 300) },
+      data: { failStreak: { increment: 1 }, lastError: redactSecrets(errorMsg, 300) },
       select: { failStreak: true, autoDisabled: true, name: true },
     })
     const threshold = Math.max(1, Number(cbThreshold?.value ?? 3) || 3)
     if (!updated.autoDisabled && updated.failStreak >= threshold) {
-      await db.channel.update({
-        where: { id: channelId },
-        data: { autoDisabled: true, autoDisabledAt: new Date() },
-      })
+      // 条件更新：只有仍处于「未熔断」状态才摘除，防止与探测侧并发重复摘除
+      await db.channel
+        .updateMany({
+          where: { id: channelId, autoDisabled: false },
+          data: { autoDisabled: true, autoDisabledAt: new Date() },
+        })
+        .catch(() => {})
       console.warn(`[gateway] 渠道「${updated.name}」连续调用失败 ${updated.failStreak} 次，自动熔断摘除`)
     }
   } catch {
@@ -107,9 +117,75 @@ async function authenticate(key: string) {
   return token && token.enabled ? token : null
 }
 
+/** 读取单把 Key 的限速阈值（次/分钟）；metadata.rateLimitPerMin，缺省 60，0 或非法 = 不限 */
+function rateLimitPerMin(metadata: unknown): number {
+  const m = (metadata ?? {}) as Record<string, unknown>
+  const v = Number(m.rateLimitPerMin)
+  if (!Number.isFinite(v) || v <= 0) return v === 0 ? 0 : DEFAULT_RATE_LIMIT_PER_MIN
+  return Math.floor(v)
+}
+
+/**
+ * 原子扣减配额并占用一次限速额度：一条 updateMany 同时完成「检查未超额」+「计数 +1」。
+ * 并发下不会超发（SQLite 单写者语义保证 updateMany 的条件判断与写入是原子的）。
+ * @returns 成功返回 null；超配额返回 'quota'；超限速返回 'rate'
+ */
+async function consumeQuotaAndRate(token: { id: string; quotaLimit: number | null }, perMin: number): Promise<'quota' | 'rate' | null> {
+  if (perMin > 0) {
+    const rl = hitRateLimit(`gw:${token.id}`, { windowMs: 60_000, max: perMin })
+    if (!rl.ok) return 'rate'
+  }
+  if (token.quotaLimit === null) return null
+  const res = await db.apiToken.updateMany({
+    where: { id: token.id, quotaUsed: { lt: token.quotaLimit } },
+    data: { quotaUsed: { increment: 1 }, lastUsedAt: new Date() },
+  })
+  if (res.count === 0) return 'quota'
+  return null
+}
+
+/**
+ * 读取请求体并强制字节上限。
+ * 不能直接用 req.text()/req.json()：content-length 可被伪造或缺失（chunked 传输），
+ * 必须对实际读到的字节计数，超限立刻中断，避免超大 body 打满内存。
+ */
+async function readBodyWithLimit(req: Request, limit: number): Promise<string> {
+  const body = req.body
+  // 无 body 流（极端情况）→ 退化为空串，交给后续 JSON.parse 报错
+  if (!body) return await req.text()
+
+  const reader = body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      if (value) {
+        total += value.byteLength
+        if (total > limit) {
+          // 超限：取消读取，不再消费剩余数据
+          await reader.cancel().catch(() => {})
+          throw new Error('__TOO_LARGE__')
+        }
+        chunks.push(value)
+      }
+    }
+  } finally {
+    reader.releaseLock?.()
+  }
+  const merged = new Uint8Array(total)
+  let off = 0
+  for (const c of chunks) {
+    merged.set(c, off)
+    off += c.byteLength
+  }
+  return new TextDecoder().decode(merged)
+}
+
 /**
  * 统一网关：POST /v1/chat/completions
- * 1. 统一 Key 鉴权  2. 模型显示名 → 路由解析
+ * 1. 统一 Key 鉴权 + 限速 + 配额  2. 模型显示名 → 路由解析
  * 3. 按渠道优先级逐个转发，非 2xx 自动故障转移到下一渠道
  * 4. 上游响应原样透传（含 SSE 流式）；每次尝试写入调用日志
  */
@@ -119,7 +195,8 @@ export async function handleChatCompletions(
 ): Promise<Response> {
   // 1. 鉴权（管理员测试模式跳过统一 Key，不消耗配额）
   const adminOverride = Boolean(opts?.adminOverride)
-  let token: { id: string; name: string; quotaLimit: number | null; quotaUsed: number }
+  let token: { id: string; name: string; quotaLimit: number | null; quotaUsed: number; metadata?: unknown }
+  let perMin = 0
   if (adminOverride) {
     token = { id: '', name: '（管理测试）', quotaLimit: null, quotaUsed: 0 }
   } else {
@@ -130,28 +207,64 @@ export async function handleChatCompletions(
       return openAiError('API Key 无效或已禁用（请使用网关统一 Key）', 'invalid_request_error', 401)
     }
     token = t
+    perMin = rateLimitPerMin(t.metadata)
   }
 
-  // 配额检查：超过上限返回 429
-  if (token.quotaLimit !== null && token.quotaUsed >= token.quotaLimit) {
+  // 2. 请求体大小上限：先看 content-length，再对流做实际字节计数（防 chunked 绕过）
+  const declaredLen = Number(req.headers.get('content-length') || '0')
+  if (Number.isFinite(declaredLen) && declaredLen > MAX_BODY_BYTES) {
     return openAiError(
-      `配额已用尽：该 Key 已达上限 ${token.quotaLimit} 次请求，请在管理台调整配额`,
-      'insufficient_quota',
-      429
+      `请求体过大（${(declaredLen / 1024 / 1024).toFixed(1)}MB），上限 ${MAX_BODY_BYTES / 1024 / 1024}MB`,
+      'invalid_request_error',
+      413
     )
   }
 
-  // 2. 解析请求体
+  // 3. 解析请求体
+  let rawBody: string
+  try {
+    rawBody = await readBodyWithLimit(req, MAX_BODY_BYTES)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (msg === '__TOO_LARGE__') {
+      return openAiError(
+        `请求体过大，上限 ${MAX_BODY_BYTES / 1024 / 1024}MB`,
+        'invalid_request_error',
+        413
+      )
+    }
+    return openAiError('请求体不是合法 JSON', 'invalid_request_error', 400)
+  }
   let body: UpstreamBody
   try {
-    body = await req.json()
+    body = JSON.parse(rawBody) as UpstreamBody
   } catch {
     return openAiError('请求体不是合法 JSON', 'invalid_request_error', 400)
   }
   const requestedModel = typeof body.model === 'string' ? body.model.trim() : ''
   if (!requestedModel) return openAiError('缺少 model 字段', 'invalid_request_error', 400)
 
-  // 3. 路由解析：精确匹配 → 最长前缀通配（"gpt-*"）→ 兜底（"*"）
+  // 4. 限速 + 配额原子扣减（放在模型解析之后，避免无效请求白吃配额）
+  if (!adminOverride) {
+    const verdict = await consumeQuotaAndRate(token, perMin)
+    if (verdict === 'quota') {
+      return openAiError(
+        `配额已用尽：该 Key 已达上限 ${token.quotaLimit} 次请求，请在管理台调整配额`,
+        'insufficient_quota',
+        429
+      )
+    }
+    if (verdict === 'rate') {
+      return openAiError(
+        `请求过于频繁：该 Key 限速 ${perMin} 次/分钟，请稍后重试`,
+        'rate_limit_error',
+        429,
+        { 'Retry-After': '10' }
+      )
+    }
+  }
+
+  // 5. 路由解析：精确匹配 → 最长前缀通配（"gpt-*"）→ 兜底（"*"）
   const enabledRoutes = await db.modelRoute.findMany({ where: { enabled: true } })
   const exact = enabledRoutes.find((r) => r.displayName === requestedModel)
   const prefixHit = enabledRoutes
@@ -165,7 +278,7 @@ export async function handleChatCompletions(
     return openAiError(`模型 "${requestedModel}" 不存在或未启用（可在管理台配置 "gpt-*" 前缀通配或 "*" 兜底路由承接未知模型）`, 'invalid_request_error', 404)
   }
 
-  // 3. 渠道配置解析（渠道级模型映射 + 权重）；熔断中的渠道自动跳过
+  // 6. 渠道配置解析（渠道级模型映射 + 权重）；熔断中的渠道自动跳过
   const cfgs = parseChannelConfigs(route)
   if (cfgs.length === 0) {
     return openAiError(`模型 "${requestedModel}" 未配置渠道`, 'api_error', 502)
@@ -185,7 +298,7 @@ export async function handleChatCompletions(
   // 负载均衡策略：按策略生成尝试顺序（与预览 API 共用同一实现）
   const { ordered } = await orderCandidates(candidates, route.strategy as RouteStrategy)
 
-  // 4. 逐渠道转发（故障转移；每个渠道用自己映射的模型名）
+  // 7. 逐渠道转发（故障转移；每个渠道用自己映射的模型名）
   const isStream = Boolean(body.stream)
   const failures: string[] = []
 
@@ -198,37 +311,54 @@ export async function handleChatCompletions(
     const start = Date.now()
     let res: Response
     const primaryUrl = upstreamUrl(ch.baseUrl, resolveChatEndpoint(adapter, modelForChannel, isStream))
+    // 客户端断开时立刻中止上游请求：否则用户关页面后上游 SSE 仍会跑完，白烧上游额度并长期占连接。
+    // AbortSignal.any 同时保留超时保护（任一信号触发即取消）。
+    const upstreamSignal = AbortSignal.any([req.signal, AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)])
     try {
       // cache:'no-store' 绕过 Next fetch 补丁的响应缓存层（其 clone 缓存会锁定 body，透传时报 disturbed）
       res = await fetch(primaryUrl, {
         method: 'POST',
         headers: adapter.buildHeaders(ch.apiKey),
         body: upstreamBody,
-        signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+        signal: upstreamSignal,
         cache: 'no-store',
       })
       // baseUrl 路径填错自愈：404 时用反向变体重试一次，成功则触发探测回写正确地址
       if (res.status === 404) {
-        void res.body?.cancel().catch(() => {}) // 释放无用连接
         const altUrl = altUpstreamUrl(ch.baseUrl, resolveChatEndpoint(adapter, modelForChannel, isStream))
         if (altUrl !== primaryUrl) {
+          // 关键：先把 404 的响应体读完留存，再释放连接。
+          // 若直接 cancel，后续读 text() 会拿到空串，排障时只会看到「HTTP 404」而无任何线索。
+          const notFoundBody = await res.text().catch(() => '')
+          const altSignal = AbortSignal.any([req.signal, AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)])
           const r2 = await fetch(altUrl, {
             method: 'POST',
             headers: adapter.buildHeaders(ch.apiKey),
             body: upstreamBody,
-            signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+            signal: altSignal,
             cache: 'no-store',
           }).catch(() => null)
           if (r2?.ok) {
             res = r2
             void probeChannelById(ch.id) // 异步：把自愈出的 baseUrl 回写库
+          } else {
+            // 变体重试也失败：把原始 404 的响应体挂回 res，让下面的错误分支能读到真实原因
+            res = new Response(notFoundBody || '404 Not Found', { status: 404 })
           }
+        } else {
+          // 无变体可试：消费掉 body 释放连接
+          void res.body?.cancel().catch(() => {})
         }
       }
     } catch (err) {
+      // 客户端主动断开不是错误，无需重试后续渠道（用户已经不关心结果了）
+      if (req.signal.aborted) {
+        console.log(`[gateway] 客户端已断开，中止对渠道「${ch.name}」的转发`)
+        return new Response(null, { status: 499 })
+      }
       const msg = err instanceof Error
-        ? (err.name === 'TimeoutError' ? `上游超时（${UPSTREAM_TIMEOUT_MS / 1000}s）` : err.message)
-        : String(err)
+        ? (err.name === 'TimeoutError' ? `上游超时（${UPSTREAM_TIMEOUT_MS / 1000}s）` : redactSecrets(err.message, 200))
+        : redactSecrets(err, 200)
       failures.push(`[${ch.name}] ${msg}`)
       const latencyMs = Date.now() - start
       void recordForwardFailure(ch.id, msg)
@@ -237,18 +367,22 @@ export async function handleChatCompletions(
     }
 
     if (!res.ok) {
-      const text = (await res.text().catch(() => '')).slice(0, 300)
-      failures.push(`[${ch.name}] HTTP ${res.status} ${text}`)
+      // 上游错误体可能回显 Key（如 "Invalid API key: sk-xxx"）或暴露内网地址，
+      // 必须脱敏后再进日志与返回体，避免把上游凭据泄漏给任何持有网关 Key 的调用方。
+      const raw = await res.text().catch(() => '')
+      const detail = redactSecrets(raw, 200)
+      const msg = `HTTP ${res.status}${detail ? ` ${detail}` : ''}`
+      failures.push(`[${ch.name}] ${msg}`)
       const latencyMs = Date.now() - start
-      void recordForwardFailure(ch.id, `HTTP ${res.status} ${text}`)
-      void logRequest({ channelName: ch.name, model: requestedModel, targetModel: modelForChannel, ok: false, statusCode: res.status, latencyMs, tokenName: token.name, stream: isStream, attempt: tryIdx + 1, error: `HTTP ${res.status} ${text}` })
+      void recordForwardFailure(ch.id, msg)
+      void logRequest({ channelName: ch.name, model: requestedModel, targetModel: modelForChannel, ok: false, statusCode: res.status, latencyMs, tokenName: token.name, stream: isStream, attempt: tryIdx + 1, error: msg })
       continue
     }
 
     // 成功 → 透传（非 openai 协议：适配器转换响应；流式经适配器 SSE 转换器）
     // 注意：Next dev 的 fetch 补丁会在 clone() 后锁定 res.body，透传必须避免 clone
     void recordForwardSuccess(ch.id)
-    const latencyMs = Date.now() - start
+    const latencyMs = Date.now() - start // 首字节延迟（TTFB）
     let totalTokens: number | null = null
     let resBody: ReadableStream<Uint8Array> | null = res.body
     let contentType = res.headers.get('content-type') || 'application/json'
@@ -270,12 +404,98 @@ export async function handleChatCompletions(
         },
       })
     }
-    void (token.id
-      ? db.apiToken
-          .update({ where: { id: token.id }, data: { lastUsedAt: new Date(), quotaUsed: { increment: 1 } } })
-          .catch(() => {})
-      : Promise.resolve())
-    void logRequest({ channelName: ch.name, model: requestedModel, targetModel: modelForChannel, ok: true, statusCode: res.status, latencyMs, totalTokens, tokenName: token.name, stream: isStream, attempt: tryIdx + 1 })
+
+    // 配额已在入口原子扣减（consumeQuotaAndRate），此处不再重复自增，只补 lastUsedAt。
+    // 管理员测试模式 token.id 为空，不落库。
+    if (!adminOverride && token.id) {
+      void db.apiToken.update({ where: { id: token.id }, data: { lastUsedAt: new Date() } }).catch(() => {})
+    }
+
+    const logBase = {
+      channelName: ch.name,
+      model: requestedModel,
+      targetModel: modelForChannel,
+      statusCode: res.status,
+      tokenName: token.name,
+      stream: isStream,
+    }
+
+    if (isStream && resBody) {
+      // 流式：拿到上游响应头时还不知道「最终是否正常结束、用了多少 token」。
+      // 套一层观察流：读到 done 时补写成功日志（含完整耗时与 usage），
+      // 读取抛错或客户端中断时记录失败原因 —— 否则流式失败在日志里完全不可见。
+      let seen = 0
+      let streamTokens: number | null = null
+      let streamText = ''
+      let settled = false
+      const reader = resBody.getReader()
+      resBody = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          try {
+            const { done, value } = await reader.read()
+            if (done) {
+              settled = true
+              controller.close()
+              void logRequest({
+                ...logBase,
+                ok: true,
+                latencyMs: Date.now() - start, // 流式：记录完整耗时而非 TTFB
+                totalTokens: streamTokens,
+                attempt: tryIdx + 1,
+              })
+              return
+            }
+            if (value) {
+              seen += value.byteLength
+              // 尝试从 SSE 增量里捞 usage（OpenAI 兼容协议在末帧带 usage）
+              if (streamTokens === null && value.byteLength < 64 * 1024) {
+                try {
+                  streamText += new TextDecoder().decode(value)
+                  const m = streamText.match(/"usage"\s*:\s*\{[^{}]*\}/g)
+                  if (m?.length) {
+                    const u = JSON.parse(m[m.length - 1].replace(/"usage"\s*:\s*/, ''))
+                    const total = Number(u.total_tokens ?? (Number(u.prompt_tokens ?? 0) + Number(u.completion_tokens ?? 0)))
+                    if (Number.isFinite(total) && total > 0) streamTokens = total
+                  }
+                  // 只保留尾部，避免长回答无限增长
+                  if (streamText.length > 32 * 1024) streamText = streamText.slice(-8 * 1024)
+                } catch {
+                  /* 解析失败不影响转发 */
+                }
+              }
+              controller.enqueue(value)
+            }
+          } catch (err) {
+            settled = true
+            const msg = redactSecrets(`流式中断：${err instanceof Error ? err.message : String(err)}`, 200)
+            console.warn(`[gateway] ${msg}（已传 ${seen} 字节）`)
+            try {
+              controller.error(err)
+            } catch {
+              /* 流可能已关闭 */
+            }
+            void logRequest({ ...logBase, ok: false, latencyMs: Date.now() - start, attempt: tryIdx + 1, error: msg })
+          }
+        },
+        async cancel(reason) {
+          // 客户端主动断开：取消上游读取，避免上游继续生成烧额度
+          if (settled) return
+          settled = true
+          await reader.cancel(reason).catch(() => {})
+          console.log(`[gateway] 客户端中断流式响应（已传 ${seen} 字节）`)
+          void logRequest({
+            ...logBase,
+            ok: false,
+            latencyMs: Date.now() - start,
+            attempt: tryIdx + 1,
+            error: '客户端中断',
+          })
+        },
+      })
+    } else {
+      void logRequest({ ...logBase, ok: true, latencyMs, totalTokens, attempt: tryIdx + 1 })
+    }
+
     const headers = new Headers()
     headers.set('Content-Type', contentType)
     headers.set('Cache-Control', 'no-cache')

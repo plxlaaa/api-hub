@@ -77,6 +77,10 @@ model ProbeLog {
   error      String?
   createdAt  DateTime @default(now())
   channel    Channel  @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  // 24h 可用率统计与历史清理都按时间倒序扫描，缺索引会全表扫
+  @@index([createdAt])
+  @@index([channelId, createdAt])
 }
 
 // 网关调用日志（渠道名存快照，渠道删除后日志仍可读）
@@ -94,4 +98,9 @@ model RequestLog {
   attempt     Int      @default(1) // 第几次渠道尝试（故障转移时 2/3…）
   error       String?
   createdAt   DateTime @default(now())
+
+  // 仪表盘/统计接口几乎每次都按时间过滤 + groupBy(channelName)，两个复合索引覆盖主要查询
+  @@index([createdAt])
+  @@index([channelName, createdAt])
+  @@index([model, createdAt])
 }
