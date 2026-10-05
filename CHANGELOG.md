@@ -6,6 +6,9 @@
 ## [未发布]
 
 ### 新增
+- **界面截图** `docs/screenshots/`：9 张真实运行实例的截图（登录、仪表盘、渠道、路由、
+  密钥、调用日志、调用示例、模型广场、暗色模式），已嵌入 README、INSTALL、docs/API。
+  配套脚本 `tools/shoot.py` 可一键重拍（Playwright），UI 改动后无需手工截图。
 - **健康检查接口** `GET /api/health`：返回 `status` / `uptimeSec` / `db.ok` / `checksMs`，
   数据库不可用时返回 **503**。容器与 systemd 可直接用它做探针，替代原先语义过弱的
   `/api/auth/status`（后者只反映「是否已初始化」，DB 挂了仍会返回 200）。

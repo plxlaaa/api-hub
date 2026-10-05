@@ -19,6 +19,33 @@
 | 🌐 配套 | 公开模型广场（脱敏状态页）、明暗双主题、配置备份导出/导入 |
 | 📦 部署 | Linux 脚本 / Windows 脚本 / Docker Compose 三种装法；`node doctor.mjs` 环境自检 |
 
+## 界面预览
+
+以下截图取自真实运行实例（演示数据），全部由 `tools/shoot.py` 自动生成，改动 UI 后可一键重拍。
+
+| 登录 | 仪表盘 |
+|------|--------|
+| <img src="docs/screenshots/01-login.png" alt="登录页" width="400"> | <img src="docs/screenshots/02-dashboard.png" alt="仪表盘：渠道健康、调用统计与 24 小时趋势" width="600"> |
+
+| 渠道管理 | 模型路由 |
+|------|----------|
+| <img src="docs/screenshots/03-channels.png" alt="渠道管理：三协议渠道、熔断状态与用量横评" width="600"> | <img src="docs/screenshots/04-routes.png" alt="模型路由：改名映射、渠道编排与负载策略" width="600"> |
+
+| 调用日志 | API 密钥 |
+|----------|---------|
+| <img src="docs/screenshots/06-request-logs.png" alt="调用日志：逐次调用的成败、延迟与Token" width="600"> | <img src="docs/screenshots/05-tokens.png" alt="API 密钥：统一调用密钥与配额" width="600"> |
+
+| 调用示例 | 模型广场 |
+|----------|----------|
+| <img src="docs/screenshots/07-usage.png" alt="调用示例：cURL / Python / Node.js 接入片段" width="600"> | <img src="docs/screenshots/08-square.png" alt="模型广场：脱敏的公开模型状态页" width="600"> |
+
+<details>
+<summary>暗色模式（点击展开）</summary>
+
+<img src="docs/screenshots/09-dashboard-dark.png" alt="暗色模式仪表盘" width="820">
+
+</details>
+
 ## 一键安装（推荐）
 
 三种装法，按环境挑一种。装完都是常驻服务 + 开机自启，不需要手工敲后续步骤。
@@ -206,3 +233,14 @@ bun run test        # 单元测试（Node 内置 runner，零依赖）
 bun run lint
 bun run doctor      # 环境自检
 ```
+
+### 重拍文档截图
+
+改完 UI 后，把服务跑起来再执行（需 `pip install playwright && playwright install chromium`）：
+
+```bash
+python3 tools/shoot.py http://127.0.0.1:3000 docs/screenshots <用户名> <密码>
+```
+
+脚本会登录、逐个标签页截图、切一次暗色模式，再把图缩到 1600px 宽并量化到 256 色
+（单张约 40KB），直接覆盖 `docs/screenshots/`。README / INSTALL / docsAPI 的引用无需改动。

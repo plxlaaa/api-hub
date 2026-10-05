@@ -14,8 +14,10 @@ db/*.env
 .DS_Store
 tsconfig.tsbuildinfo
 
-# 前端截图（本地验证用，不入库）
-docs/screenshots/
+# 截图临时输出目录（正式文档截图在 docs/screenshots/，需要入库）
+tools/_shots/
+__pycache__/
+*.pyc
 
 # npm 会生成 package-lock.json，但本项目用 bun（bun.lock 为唯一锁文件）。
 # 提交 npm 锁文件会造成两套依赖树并存，CI/本地解析结果可能不一致。

@@ -300,6 +300,25 @@ curl -fsS http://127.0.0.1:3000/api/health
 > 早期版本曾用 `/api/auth/status` 当探针，但它只反映「是否已初始化」，
 > **数据库挂了它照样返回 200**。请统一改用 `/api/health`。
 
+### 排错时对照界面
+
+装完之后，下面这几张界面截图能帮你快速确认「服务到底起来没有」——
+**页面打得开= 进程和数据库都正常**，页面打得开但数据全是空/报错，才需要按上面的 FAQ 逐项排查。
+
+| 渠道健康与熔断状态 | 调用日志（含 requestId） |
+|------|----------|
+| <img src="docs/screenshots/03-channels.png" alt="渠道管理" width="600"> | <img src="docs/screenshots/06-request-logs.png" alt="调用日志" width="600"> |
+
+仪表盘的「渠道健康」卡片是最快的自检点：**在线数应等于已启用且未熔断的渠道数**。
+若显示 `在线 0 /异常 N`，展开渠道管理页看「状态」列与自动熔断提示，错误原因就写在那一行里。
+
+<details>
+<summary>仪表盘（含 24 小时趋势与密钥配额）</summary>
+
+<img src="docs/screenshots/02-dashboard.png" alt="仪表盘" width="820">
+
+</details>
+
 ### 常见问题FAQ
 
 **Q：启动报 `Unable to open the database file` / `Error code: 14`**
