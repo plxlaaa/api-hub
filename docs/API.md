@@ -10,7 +10,9 @@ Cookie 会话鉴权）。部署与安装见 [INSTALL.md](../INSTALL.md)。
 
 > 文档里的 Base URL、Key、模型名，都可以在管理台「调用示例」页直接复制实时值：
 >
-> <img src="screenshots/07-usage.png" alt="调用示例页：Base URL、Key 与 cURL/Python/Node.js 片段" width="820">
+> <img src="screenshots/07-usage.png" alt="调用示例页：Base URL、Key 与 cURL/Python/Node.js 片段" width="100%">
+>
+> 上面每个接口的路径与参数，都能在该页对应位置找到可直接复制的现成请求。
 
 ---
 
@@ -239,14 +241,19 @@ curl "http://hub:3000/api/request-logs?limit=50&cursor=<nextCursor>"
 筛选参数（两者通用）：`tokenName`、`model`、`channelName`、`ok`（`1` 仅成功 / `0` 仅失败）。
 `tokenName=-` 表示筛选「管理测试」这类无密钥的记录。
 
-这两个接口在管理台上的呈现（截图取自真实实例）：
+这两个接口在管理台上的呈现（截图取自真实实例，单列全宽便于手机端查看）。
 
-| 调用日志 `/api/request-logs` | 密钥配额 `/api/tokens` |
-|------|------|
-| <img src="screenshots/06-request-logs.png" alt="调用日志界面" width="600"> | <img src="screenshots/05-tokens.png" alt="API 密钥与配额" width="600"> |
+**`GET /api/request-logs` 调用日志**：「结果」列失败行会显示 HTTP 状态与错误摘要；
+「尝试」列 >1 表示发生过故障转移，说明至少一个渠道失败后由下一个渠道兜住了——
+排查稳定性问题从这里入手最快。
 
-> 左侧「结果」列的失败行会显示 HTTP 状态与错误摘要；「尝试」列 >1 表示发生过故障转移，
-> 说明至少一个渠道失败后由下一个渠道兜住了——排查稳定性问题从这里入手最快。
+<img src="screenshots/06-request-logs.png" alt="调用日志界面" width="100%">
+
+**`GET /api/tokens` 密钥配额**：每把 Key 的配额上限、已用量、调用次数与最近使用时间，
+都是 `quotaLimit` / `quotaUsed` 等字段的直接呈现。
+
+<img src="screenshots/05-tokens.png" alt="API 密钥与配额" width="100%">
+
 
 ### 统计与其它
 

@@ -21,30 +21,62 @@
 
 ## 界面预览
 
-以下截图取自真实运行实例（演示数据），全部由 `tools/shoot.py` 自动生成，改动 UI 后可一键重拍。
+以下截图取自真实运行实例（演示数据），由 `tools/shoot.py` 自动生成，改动 UI 后可一键重拍。
+每张图单列全宽显示，手机端直接下滑即可看全，不需要点开放大。
 
-| 登录 | 仪表盘 |
-|------|--------|
-| <img src="docs/screenshots/01-login.png" alt="登录页" width="400"> | <img src="docs/screenshots/02-dashboard.png" alt="仪表盘：渠道健康、调用统计与 24 小时趋势" width="600"> |
+### 登录页
 
-| 渠道管理 | 模型路由 |
-|------|----------|
-| <img src="docs/screenshots/03-channels.png" alt="渠道管理：三协议渠道、熔断状态与用量横评" width="600"> | <img src="docs/screenshots/04-routes.png" alt="模型路由：改名映射、渠道编排与负载策略" width="600"> |
+首次访问只有这一屏：设置令牌（首启时印在服务器日志和 `db/setup-token.txt`）→ 自设用户名密码 → 进入面板。
 
-| 调用日志 | API 密钥 |
-|----------|---------|
-| <img src="docs/screenshots/06-request-logs.png" alt="调用日志：逐次调用的成败、延迟与Token" width="600"> | <img src="docs/screenshots/05-tokens.png" alt="API 密钥：统一调用密钥与配额" width="600"> |
+<img src="docs/screenshots/01-login.png" alt="登录页" width="100%">
 
-| 调用示例 | 模型广场 |
-|----------|----------|
-| <img src="docs/screenshots/07-usage.png" alt="调用示例：cURL / Python / Node.js 接入片段" width="600"> | <img src="docs/screenshots/08-square.png" alt="模型广场：脱敏的公开模型状态页" width="600"> |
+### 仪表盘
 
-<details>
-<summary>暗色模式（点击展开）</summary>
+一屏看完渠道健康、调用统计、密钥配额与近 24 小时调用趋势。
 
-<img src="docs/screenshots/09-dashboard-dark.png" alt="暗色模式仪表盘" width="820">
+<img src="docs/screenshots/02-dashboard.png" alt="仪表盘：渠道健康、调用统计与 24 小时趋势" width="100%">
 
-</details>
+### 渠道管理
+
+三种上游协议统一管理，每行直接显示在线 / 离线（几连败）/ 熔断中，以及该渠道的调用量、成功率、延迟与 Token 消耗。
+
+<img src="docs/screenshots/03-channels.png" alt="渠道管理：三协议渠道、熔断状态与用量横评" width="100%">
+
+### 模型路由
+
+模型改名映射到上游真实模型名，一个模型可绑定多个渠道并设权重/智商/成本，六种负载策略可选。
+
+<img src="docs/screenshots/04-routes.png" alt="模型路由：改名映射、渠道编排与负载策略" width="100%">
+
+### 调用日志
+
+逐次调用的成败、HTTP 状态、延迟、Token 与故障转移过程；筛选、导出 CSV、游标翻页。
+
+<img src="docs/screenshots/06-request-logs.png" alt="调用日志：逐次调用的成败、延迟与 Token" width="100%">
+
+### API 密钥
+
+网关统一调用密钥，明文只在创建时显示一次，可设配额上限并统计每把 Key 的用量。
+
+<img src="docs/screenshots/05-tokens.png" alt="API 密钥：统一调用密钥与配额" width="100%">
+
+### 调用示例
+
+Base URL、Key、各模型显示名都是从当前配置实时取值，可直接复制 cURL / Python / Node.js 片段。
+
+<img src="docs/screenshots/07-usage.png" alt="调用示例：cURL / Python / Node.js 接入片段" width="100%">
+
+### 模型广场
+
+对外公开的模型状态页，只暴露模型名与可用性，不泄露渠道名与 Key。
+
+<img src="docs/screenshots/08-square.png" alt="模型广场：脱敏的公开模型状态页" width="100%">
+
+### 暗色模式
+
+全站语义色在暗色下同样正确，不是简单反色。
+
+<img src="docs/screenshots/09-dashboard-dark.png" alt="暗色模式仪表盘" width="100%">
 
 ## 一键安装（推荐）
 
