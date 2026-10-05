@@ -16,7 +16,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/comp
 import { EmptyState, SkeletonRows } from '@/components/feedback'
 import { KeyValue, LatencyReadout, StatusChip, Truncate } from '@/components/metrics'
 import { ResponsiveList } from '@/components/responsive-list'
-import { api, fmtTime } from '@/lib/api-client'
+import { api, apiList, fmtTime } from '@/lib/api-client'
 import type { RequestLogItem } from '@/types'
 
 export function RequestLogsTab() {
@@ -33,13 +33,13 @@ export function RequestLogsTab() {
   if (okFilter !== 'all') qs.set('ok', okFilter)
   const { data: logs = [], isLoading } = useQuery<RequestLogItem[]>({
     queryKey: ['request-logs', tokenFilter, modelFilter, channelFilter, okFilter],
-    queryFn: () => api(`/api/request-logs?${qs.toString()}`),
+    queryFn: () => apiList<RequestLogItem>(`/api/request-logs?${qs.toString()}`),
     refetchInterval: 10000,
   })
   // 筛选选项：从全量日志（不筛）里取 distinct 密钥/模型/渠道名
   const { data: allLogs = [] } = useQuery<RequestLogItem[]>({
     queryKey: ['request-logs', 'all'],
-    queryFn: () => api('/api/request-logs?limit=200'),
+    queryFn: () => apiList<RequestLogItem>('/api/request-logs?limit=200'),
     refetchInterval: 30000,
   })
   const tokenOptions = useMemo(() => {

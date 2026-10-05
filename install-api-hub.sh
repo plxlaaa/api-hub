@@ -109,7 +109,7 @@ do_status() {
   elif [[ -f "$INSTALL_DIR/db/credentials.env" ]]; then
     echo; ok "管理员已初始化，直接用用户名+密码登录"
   fi
-  echo; info "健康检查：curl -s http://127.0.0.1:$PORT/api/auth/status"
+  echo; info "健康检查：curl -s http://127.0.0.1:$PORT/api/health"
   exit 0
 }
 
@@ -368,9 +368,11 @@ start_and_verify() {
   fi
   local i code
   for i in $(seq 1 60); do
-    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$PORT/" 2>/dev/null || echo 000)
-    if [[ "$code" =~ ^(200|20[1-9]|30[0-9]|40[0-9])$ ]]; then
-      ok "服务已就绪（${i}s，HTTP $code）：http://127.0.0.1:$PORT"
+    # 用 /api/health 而非 /：后者是前端页面，DB 挂了照样 200，
+    # 会让安装脚本在数据库不可用时误报「已就绪」。
+    code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$PORT/api/health" 2>/dev/null || echo 000)
+    if [[ "$code" == "200" ]]; then
+      ok "服务已就绪（${i}s，数据库就绪）：http://127.0.0.1:$PORT"
       return 0
     fi
     sleep 1

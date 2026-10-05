@@ -1,0 +1,61 @@
+# ============================================================
+#  API Hub systemd 服务单元
+#  安装：
+#    sudo cp deploy/systemd/api-hub.service /etc/systemd/system/
+#    sudo systemctl daemon-reload
+#    sudo systemctl enable --now api-hub
+#
+#  脚本安装（install-api-hub.sh）会自动生成等价配置，此文件供手动部署使用。
+# ============================================================
+
+[Unit]
+Description=API Hub · 个人公益站 API 聚合网关
+Documentation=https://github.com/plxlaaa/api-hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=api-hub
+Group=api-hub
+WorkingDirectory=/opt/api-hub
+Environment=NODE_ENV=production
+Environment=PORT=3000
+# 只监听本机，由 Caddy/nginx 反代对外。只在本机直连时才改成 0.0.0.0
+Environment=HOSTNAME=127.0.0.1
+Environment=TZ=Asia/Shanghai
+# 日志级别：debug | info | warn | error | silent
+Environment=LOG_LEVEL=info
+# 日志格式：json（采集） | text（人读）
+Environment=LOG_FORMAT=json
+
+# systemd 对可执行路径有白名单校验，命令必须用绝对路径
+ExecStart=/usr/bin/node /opt/api-hub/.next/standalone/server.js
+
+# 优雅停机：先停止接收新请求，等存量请求跑完（长流式回答需要时间）
+KillSignal=SIGTERM
+TimeoutStopSec=45
+Restart=always
+RestartSec=5
+# 反复崩溃时不要疯狂重启（10 分钟内超过 5 次即停止重试并标记失败）
+StartLimitBurst=5
+StartLimitIntervalSec=600
+
+# ---- 安全加固 ----
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+# 需要写db/ 目录，故放开 ReadWritePaths
+ReadWritePaths=/opt/api-hub/db
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=api-hub
+
+[Install]
+WantedBy=multi-user.target

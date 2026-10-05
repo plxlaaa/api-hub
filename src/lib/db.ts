@@ -1,5 +1,7 @@
 import path from 'node:path'
+import fs from 'node:fs'
 import { PrismaClient } from '@prisma/client'
+import { log } from '@/lib/logger'
 
 // The DB location is a project-relative invariant: <project root>/db/custom.db.
 // Ignore the platform-injected DATABASE_URL (workspace root) entirely.
@@ -9,8 +11,33 @@ import { PrismaClient } from '@prisma/client'
 // - WAL：读写不互斥，探测调度器写日志的同时网关仍可读
 // - busy_timeout：写锁竞争时等待而不是立刻报错
 // 这三项在首次连接时通过 $queryRaw 设置（PRAGMA 是连接级语句，需在连接建立后执行）。
-const dbFile = path.join(process.cwd(), 'db', 'custom.db')
+const dbDir = path.join(process.cwd(), 'db')
+const dbFile = path.join(dbDir, 'custom.db')
 const databaseUrl = `file:${dbFile}?connection_limit=1`
+
+/**
+ * 确保 db/ 目录存在。
+ *
+ * 为什么必须做：SQLite 不会自动创建父目录，目录不存在时首次连接直接报
+ * `Error code 14: Unable to open the database file`，后续所有 PRAGMA 与建表全部失败。
+ * 触发场景不少见且难以第一眼定位：
+ * - 全新克隆仓库后直接 `npm run build && npm start`（没先跑 prisma db push）
+ * - 容器卷首次挂载到 /app/db 时若挂错路径
+ * - 用 tarball/standalone 产物启动时 cwd 与预期不符
+ * 故在建连前主动 mkdir，失败只记警告（后续建表会给出更清晰的错误）。
+ */
+function ensureDbDir(): void {
+  try {
+    fs.mkdirSync(dbDir, { recursive: true })
+  } catch (err) {
+    log.warn('创建数据库目录失败（继续运行）', {
+      dir: dbDir,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+}
+
+ensureDbDir()
 
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined
@@ -28,8 +55,10 @@ export const db =
  * 应用 SQLite PRAGMA。
  * 用 $executeRawUnsafe 而非 $queryRaw：PRAGMA journal_mode 会返回结果集，用 execute 会被驱动拒。
  * 失败只记警告不抛：老版本 SQLite 不支持 WAL 时应能降级回默认日志模式继续跑。
+ * @returns 执行失败的 PRAGMA 列表（供上层判断是否真的就绪）
  */
-async function applyPragmas(client: PrismaClient): Promise<void> {
+async function applyPragmas(client: PrismaClient): Promise<string[]> {
+  const failed: string[] = []
   for (const pragma of [
     'PRAGMA journal_mode = WAL',
     'PRAGMA busy_timeout = 5000',
@@ -39,9 +68,11 @@ async function applyPragmas(client: PrismaClient): Promise<void> {
     try {
       await client.$queryRawUnsafe(pragma)
     } catch (err) {
-      console.warn(`[db] ${pragma} 执行失败（继续运行）:`, err instanceof Error ? err.message : err)
+      failed.push(pragma)
+      log.warn('PRAGMA 执行失败（继续运行）', { pragma, error: err })
     }
   }
+  return failed
 }
 
 /**
@@ -164,28 +195,40 @@ async function tablesMissing(client: PrismaClient): Promise<boolean> {
   return rows.length < 6
 }
 
-async function ensureSchema(client: PrismaClient): Promise<void> {
+/** @returns 本次是否新建了表（false = 表已就绪或建表失败） */
+async function ensureSchema(client: PrismaClient): Promise<boolean> {
   try {
-    if (!(await tablesMissing(client))) return
-    console.log('[db] 未检测到完整数据表，正在自动初始化…')
+    if (!(await tablesMissing(client))) return false
+    log.info('未检测到完整数据表，开始自动初始化')
     for (const ddl of SCHEMA_DDL) {
       await client.$executeRawUnsafe(ddl)
     }
-    console.log('[db] 数据表初始化完成')
+    log.info('数据表初始化完成', { statements: SCHEMA_DDL.length })
+    return true
   } catch (err) {
     // 建表失败不阻断启动：让上层接口报出真实错误，便于排查
-    console.error('[db] 自动建表失败：', err instanceof Error ? err.message : err)
+    log.error('自动建表失败', { error: err })
+    return false
   }
 }
 
 async function bootstrap(client: PrismaClient): Promise<void> {
-  await ensureSchema(client)
-  await applyPragmas(client)
-  console.log('[db] SQLite 就绪（WAL + busy_timeout=5000）')
+  const created = await ensureSchema(client)
+  const failedPragmas = await applyPragmas(client)
+  // 只有真的连上库才敢报「就绪」：此前无论 PRAGMA 是否失败都无条件打印就绪，
+  // 目录缺失等场景下会输出误导性的成功日志，把排查方向带偏。
+  if (created === false && failedPragmas.length > 0) {
+    log.error('SQLite 初始化异常，请检查 db/ 目录权限与磁盘空间', {
+      dbFile,
+      failedPragmas,
+    })
+    return
+  }
+  log.info('SQLite 就绪', { dbFile, journalMode: 'WAL', busyTimeoutMs: 5000, autoCreated: created })
 }
 
 export const dbReady: Promise<void> = (globalForPrisma.prismaReady ??= bootstrap(db).catch((err) => {
-  console.warn('[db] 初始化异常（继续运行）:', err instanceof Error ? err.message : err)
+  log.warn('数据库初始化异常（继续运行）', { error: err })
 }))
 
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = db

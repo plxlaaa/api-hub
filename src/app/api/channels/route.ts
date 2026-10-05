@@ -5,21 +5,11 @@ import { parseApiFormat } from '@/lib/adapters'
 import { parseMetadata } from '@/lib/metadata'
 import { parseStringArray } from '@/lib/json-field'
 import { checkUpstreamUrl, allowsInternalUrl } from '@/lib/url-safety'
+import { resolveRequestId, jsonOk, jsonBadRequest } from '@/lib/api-response'
+import { Validator, validationResponse } from '@/lib/validate'
+import { log } from '@/lib/logger'
 
 export const dynamic = 'force-dynamic'
-
-function parseModels(raw: unknown): string[] {
-  if (Array.isArray(raw)) {
-    return raw.map((m) => String(m).trim()).filter(Boolean)
-  }
-  if (typeof raw === 'string') {
-    return raw
-      .split(/[\n,]/)
-      .map((m) => m.trim())
-      .filter(Boolean)
-  }
-  return []
-}
 
 export async function GET(req: Request) {
   const denied = await requireAdmin(req)
@@ -79,30 +69,41 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  const requestId = resolveRequestId(req)
   const denied = await requireAdmin(req)
   if (denied) return denied
   const body = await req.json().catch(() => null)
-  if (!body) return Response.json({ error: '请求体非法' }, { status: 400 })
+  if (!body) return jsonBadRequest('请求体非法', requestId)
 
-  const { name, baseUrl, apiKey, models, remark, enabled, apiFormat, metadata } = body as Record<string, unknown>
-  if (typeof name !== 'string' || !name.trim()) return Response.json({ error: '渠道名称必填' }, { status: 400 })
+  // 统一校验：一次收齐全部问题，长度上限防止超长字段入库
+  const v = new Validator(body)
+  const name = v.string('name', { required: true, max: 80 })
+  const baseUrl = v.string('baseUrl', { required: true, max: 500 })
+  const apiKey = v.string('apiKey', { required: true, max: 500 })
+  const remark = v.optionalString('remark', { max: 500 })
+  const models = v.stringArray('models', { max: 500, itemMax: 120 })
+  const enabled = v.boolean('enabled')
+  const apiFormat = v.enum('apiFormat', ['openai', 'anthropic', 'gemini'] as const)
+  const metadata = v.object('metadata')
+  if (v.failed()) return validationResponse(v)
+
   // SSRF 校验：baseUrl 会被服务端主动 fetch，内网/元数据地址默认拒绝
-  const checkedUrl = checkUpstreamUrl(String(baseUrl ?? ''), allowsInternalUrl(metadata) || allowsInternalUrl(remark))
-  if (!checkedUrl.ok) return Response.json({ error: checkedUrl.reason }, { status: 400 })
-  if (typeof apiKey !== 'string' || !apiKey.trim()) return Response.json({ error: 'API Key 必填' }, { status: 400 })
+  const checkedUrl = checkUpstreamUrl(baseUrl, allowsInternalUrl(metadata) || allowsInternalUrl(remark))
+  if (!checkedUrl.ok) return jsonBadRequest(checkedUrl.reason, requestId)
 
   const m = parseMetadata(metadata)
   const ch = await db.channel.create({
     data: {
-      name: name.trim(),
+      name,
       baseUrl: checkedUrl.url,
-      apiKey: apiKey.trim(),
+      apiKey,
       apiFormat: parseApiFormat(apiFormat),
-      models: JSON.stringify(parseModels(models)),
-      remark: typeof remark === 'string' ? remark.trim() : null,
+      models: JSON.stringify(models),
+      remark: remark ?? null,
       enabled: enabled === false ? false : true,
       ...(m ? { metadata: m } : {}),
     },
   })
-  return Response.json({ id: ch.id })
+  log.info('渠道已创建', { requestId, channelId: ch.id, name, apiFormat: parseApiFormat(apiFormat) })
+  return jsonOk({ id: ch.id }, { requestId })
 }

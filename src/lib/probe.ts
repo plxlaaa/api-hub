@@ -1,4 +1,5 @@
 import { db } from '@/lib/db'
+import { log } from '@/lib/logger'
 import { getAdapter, resolveChatEndpoint } from '@/lib/adapters'
 import { redactSecrets } from '@/lib/redact'
 import { parseStringArray } from '@/lib/json-field'
@@ -150,7 +151,7 @@ export async function probeChannelById(channelId: string): Promise<ProbeResult> 
   if (result.ok && result.fixedBaseUrl && result.fixedBaseUrl !== ch.baseUrl) {
     await db.channel.update({ where: { id: channelId }, data: { baseUrl: result.fixedBaseUrl } })
     fixedNote = `已自动补全 baseUrl：${ch.baseUrl} → ${result.fixedBaseUrl}`
-    console.log(`[probe] 渠道「${ch.name}」${fixedNote}`)
+    log.info('已自动补全 baseUrl', { channelId, channel: ch.name, from: ch.baseUrl, to: result.fixedBaseUrl })
   }
 
   if (breakerEnabled) {
@@ -168,12 +169,14 @@ export async function probeChannelById(channelId: string): Promise<ProbeResult> 
         if (r.count > 0) {
           autoDisabled = false
           autoDisabledAt = null
-          console.log(`[probe] 渠道「${ch.name}」探测恢复，自动重新启用`)
+          log.info('探测恢复，渠道自动重新启用', { channelId, channel: ch.name })
         }
       } else {
-        console.log(
-          `[probe] 渠道「${ch.name}」探测已恢复，但仍在熔断冷却期（${Math.ceil((BREAKER_RECOVER_COOLDOWN_MS - since) / 1000)}s 后再评估）`
-        )
+        log.info('探测已恢复但仍在熔断冷却期', {
+          channelId,
+          channel: ch.name,
+          remainSec: Math.ceil((BREAKER_RECOVER_COOLDOWN_MS - since) / 1000),
+        })
       }
     } else if (!result.ok && !ch.autoDisabled && failStreak >= threshold) {
       // 熔断：连续失败达到阈值，自动摘除（条件更新防并发重复摘除）
@@ -186,7 +189,7 @@ export async function probeChannelById(channelId: string): Promise<ProbeResult> 
       if (r.count > 0) {
         autoDisabled = true
         autoDisabledAt = new Date()
-        console.warn(`[probe] 渠道「${ch.name}」连续失败 ${failStreak} 次，自动熔断摘除`)
+        log.warn('探测连续失败，渠道自动熔断摘除', { channelId, channel: ch.name, failStreak, threshold })
       }
     }
   }
@@ -225,7 +228,7 @@ export async function probeAllChannels(): Promise<void> {
         const item = queue.shift()
         if (!item) return
         await probeChannelById(item.id).catch((err) => {
-          console.error(`[probe] 渠道 ${item.id} 探测异常:`, err instanceof Error ? err.message : err)
+          log.error('渠道探测异常', { channelId: item.id, error: err })
         })
       }
     })
@@ -241,7 +244,7 @@ export async function probeAllChannels(): Promise<void> {
       await db.probeLog.deleteMany({ where: { id: { in: stale.map((l) => l.id) } } })
     }
   } catch (err) {
-    console.error('[probe] probeAllChannels failed:', err)
+    log.error('批量探测失败', { error: err })
   }
 }
 
@@ -252,7 +255,7 @@ export function startProbeScheduler(): void {
   g.__gwProbeStarted = true
   setTimeout(() => void probeAllChannels(), 5_000)
   g.__gwProbeTimer = setInterval(() => void probeAllChannels(), PROBE_INTERVAL_MS)
-  console.log(`[probe] scheduler started (every ${PROBE_INTERVAL_MS / 1000}s)`)
+  log.info('探测调度器已启动', { intervalSec: PROBE_INTERVAL_MS / 1000 })
 }
 
 // ---------- 渠道真实对话测试 ----------

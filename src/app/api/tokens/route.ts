@@ -2,6 +2,9 @@ import { randomBytes } from 'node:crypto'
 import { db } from '@/lib/db'
 import { requireAdmin } from '@/lib/auth'
 import { parseMetadata } from '@/lib/metadata'
+import { resolveRequestId, jsonOk, jsonBadRequest } from '@/lib/api-response'
+import { Validator, validationResponse } from '@/lib/validate'
+import { log } from '@/lib/logger'
 
 export const dynamic = 'force-dynamic'
 
@@ -43,24 +46,23 @@ export async function GET(req: Request) {
 }
 
 export async function POST(req: Request) {
+  const requestId = resolveRequestId(req)
   const denied = await requireAdmin(req)
   if (denied) return denied
   const body = await req.json().catch(() => null)
-  const name = (body as Record<string, unknown> | null)?.name
-  if (typeof name !== 'string' || !name.trim()) {
-    return Response.json({ error: '密钥名称必填' }, { status: 400 })
-  }
-  // 配额：null/undefined = 不限；正整数 = 请求次数上限
-  const rawQuota = (body as Record<string, unknown> | null)?.quotaLimit
-  const quotaLimit =
-    rawQuota === null || rawQuota === undefined || rawQuota === ''
-      ? null
-      : Number.isFinite(Number(rawQuota)) && Number(rawQuota) > 0
-        ? Math.floor(Number(rawQuota))
-        : null
+  if (!body) return jsonBadRequest('请求体非法', requestId)
+
+  const v = new Validator(body)
+  const name = v.string('name', { required: true, max: 80 })
+  // 配额：缺省/空 = 不限；正整数 = 请求次数上限
+  const quotaLimit = v.integer('quotaLimit', { min: 1, max: 100_000_000 })
+  const metadata = v.object('metadata')
+  if (v.failed()) return validationResponse(v)
+
   const key = `sk-gw-${randomBytes(24).toString('base64url')}`
-  const m = parseMetadata((body as Record<string, unknown>).metadata)
-  const token = await db.apiToken.create({ data: { name: name.trim(), key, quotaLimit, ...(m ? { metadata: m } : {}) } })
+  const m = parseMetadata(metadata)
+  const token = await db.apiToken.create({ data: { name, key, quotaLimit: quotaLimit ?? null, ...(m ? { metadata: m } : {}) } })
+  log.info('统一密钥已创建', { requestId, tokenId: token.id, name, quotaLimit: quotaLimit ?? null })
   // 创建时返回完整 key（仅此一次可见）
-  return Response.json({ id: token.id, key: token.key })
+  return jsonOk({ id: token.id, key: token.key }, { requestId })
 }

@@ -16,3 +16,9 @@ tsconfig.tsbuildinfo
 
 # 前端截图（本地验证用，不入库）
 docs/screenshots/
+
+# npm 会生成 package-lock.json，但本项目用 bun（bun.lock 为唯一锁文件）。
+# 提交 npm 锁文件会造成两套依赖树并存，CI/本地解析结果可能不一致。
+package-lock.json
+yarn.lock
+pnpm-lock.yaml

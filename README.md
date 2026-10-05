@@ -15,6 +15,7 @@
 | 🔑 统一调用 | 客户端始终用 OpenAI 格式访问网关；密钥配额限制；流式 SSE 全支持 |
 | 🔐 管理安全 | 首次自设用户名+密码（scrypt 加盐哈希，明文不落盘）；一次性设置令牌防抢注；登录 5 次错锁 10 分钟；HttpOnly 会话 Cookie 防 XSS 窃取 |
 | 🛡️ 后端加固 | 客户端断开即中止上游请求（不白烧额度）；上游错误体密钥自动脱敏；渠道地址默认禁内网（防 SSRF）；统一 Key 限速 + 配额原子扣减；SQLite WAL + 忙等超时；熔断冷却期防抖动 |
+| 🔭 可观测 | 结构化 JSON 日志（级别过滤 + 字段自动脱敏 + 请求 ID 全链路透传）；`/api/health` 健康检查（真探测数据库可读写，异常返回 503）；日志接口游标分页，深翻页不再全表扫 |
 | 🌐 配套 | 公开模型广场（脱敏状态页）、明暗双主题、配置备份导出/导入 |
 | 📦 部署 | Linux 脚本 / Windows 脚本 / Docker Compose 三种装法；`node doctor.mjs` 环境自检 |
 
@@ -27,6 +28,9 @@
 | Linux 服务器（有 systemd） | [方式一：install-api-hub.sh](#方式一linux-脚本安装) |
 | Windows 10/11 | [方式二：install-api-hub.ps1](#方式二windows-脚本安装) |
 | 不想在机器上装 Node / 没有 root / 容器环境 | [方式三：Docker](#方式三docker-一键部署) |
+
+> 完整安装部署（含 WSL2、nssm 手工注册、反代配置、备份恢复、FAQ）见 **[INSTALL.md](INSTALL.md)**；
+> 接口清单见 **[docs/API.md](docs/API.md)**；版本变化见 **[CHANGELOG.md](CHANGELOG.md)**。
 
 > 三种方式都需要 GitHub PAT（私有仓库拉源码）。令牌只用于下载源码，脚本不会上传任何数据，
 > 别把它写进脚本或提交到仓库。
@@ -148,6 +152,35 @@ curl http://localhost:3000/v1/chat/completions \
 
 详见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
+## 健康检查与日志排错
+
+服务提供无需鉴权的健康端点，可直接给容器/systemd 用：
+
+```bash
+curl -fsS http://127.0.0.1:3000/api/health
+# {"status":"ok","uptimeSec":86400,"db":{"ok":true},"checksMs":1,...}     ← 200
+# {"status":"degraded",...,"db":{"ok":false,"error":"..."}}             ← 503（DB 不可用）
+```
+
+`503` 表示进程还活着但数据库不可用，**不该再往里导流量**。
+注意别用 `/api/auth/status` 当探针——它只反映「是否已初始化」，DB 挂了照样返回 200。
+
+日志为结构化 JSON，每条含 `ts` / `level` / `msg`，字段自动脱敏（不会把上游 Key 写进日志）。
+网关请求带 `requestId`，与响应头 `X-Request-Id` 一致，可直接串联整条链路：
+
+```bash
+journalctl -u api-hub -f | grep 'a1b2c3d4'   # Linux
+docker compose logs -f api-hub                # Docker
+```
+
+| 环境变量 | 默认 | 说明 |
+|---------|------|------|
+| `LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` / `silent` |
+| `LOG_FORMAT` | `json` | `json`（采集）/ `text`（终端人读） |
+| `PRISMA_LOG` | — |设为 `query` 打印 SQL，排查慢查询 |
+
+更多排错场景见 [INSTALL.md](INSTALL.md#常见问题faq)。
+
 ## 技术栈
 
 Next.js (App Router) · TypeScript · Prisma + SQLite · Tailwind CSS · shadcn/ui · TanStack Query
@@ -159,15 +192,17 @@ Next.js (App Router) · TypeScript · Prisma + SQLite · Tailwind CSS · shadcn/
 - 管理端已做服务器面板级防护：一次性设置令牌（防抢注）、登录 5 次错锁 10 分钟、HttpOnly 会话 Cookie
 - 面板若要暴露公网，**务必配 HTTPS**（域名 + 反向代理）；`公网IP:端口` 裸 HTTP 会让登录密码明文过网
 - 反向代理必须注入 `X-Real-IP`：登录防爆破只信任这个头，不注入的话客户端可自带该头伪造 IP 绕过锁定
+- 只由反代对外时，让服务只监听本机（`HOSTNAME=127.0.0.1`），避免端口被直接暴露公网
 - 渠道 baseUrl 默认拒绝内网地址与云元数据地址（防 SSRF）；确需内网自建渠道，在该渠道 metadata 里加 `allowInternal: true`
 - 统一 Key 默认限速 60 次/分钟，可在密钥 metadata 里用 `rateLimitPerMin` 调整（0 = 不限）
+- 健康检查端点 `/api/health` 只回粗粒度状态、无敏感信息，可安全暴露；日志字段会自动脱敏，但仍不要把日志目录设为可公开访问
 - 捐赠渠道的 Key 请仅用于个人额度，遵守各公益站规则
 
 ## 开发
 
 ```bash
 bun run typecheck   # tsc 类型检查
-bun run test        # 安全模块单测（Node 内置 runner，零依赖）
+bun run test        # 单元测试（Node 内置 runner，零依赖）
 bun run lint
 bun run doctor      # 环境自检
 ```

@@ -48,6 +48,8 @@ tests/security.test.ts   安全模块单测（Node 内置 runner，零依赖）
 3. **首次建表不能依赖 prisma CLI**。容器内没有 CLI，改由 `src/lib/db.ts` 在启动时执行
    `CREATE TABLE IF NOT EXISTS`（代码里的 `SCHEMA_DDL`）兜底。
    **改 `prisma/schema.prisma` 时必须同步改 `SCHEMA_DDL`**，否则新装环境缺表。
+   同时`db/` 目录由 `db.ts` 启动时 `mkdirSync(recursive)` 自动创建——SQLite 不会自动建父目录，
+   目录缺失时首次连接会直接报 `Error code: 14: Unable to open the database file`。
 
 ### 环境适配
 

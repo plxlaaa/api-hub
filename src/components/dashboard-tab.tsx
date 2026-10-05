@@ -20,7 +20,7 @@ import {
   fmtLatency,
 } from '@/components/metrics'
 import { channelStatus } from '@/lib/channel-ui'
-import { api, fmtTime } from '@/lib/api-client'
+import { api, apiList, fmtTime } from '@/lib/api-client'
 import type { ApiTokenItem, Channel, ProbeLogItem, Stats } from '@/types'
 import { cn } from '@/lib/utils'
 import { Bar, BarChart, CartesianGrid, Legend, ResponsiveContainer, Tooltip as ChartTooltip, XAxis, YAxis } from 'recharts'
@@ -34,7 +34,7 @@ export function DashboardTab() {
   })
   const { data: logs = [] } = useQuery<ProbeLogItem[]>({
     queryKey: ['logs'],
-    queryFn: () => api('/api/logs'),
+    queryFn: () => apiList<ProbeLogItem>('/api/logs'),
     refetchInterval: 10000,
   })
   const { data: tokens = [] } = useQuery<ApiTokenItem[]>({

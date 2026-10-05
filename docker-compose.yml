@@ -32,7 +32,9 @@ services:
       # SQLite 库 + 凭据 + 一次性设置令牌，都在这个卷里
       - api-hub-data:/app/db
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/auth/status"]
+      # 用 /api/health：它会真正探测数据库可读写，DB 挂了才判 unhealthy。
+      # 不要换回 /api/auth/status —— 那个只反映「是否已初始化」，DB 挂了仍返回 200。
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -29,6 +29,26 @@ export function fmtTime(iso: string | null | undefined): string {
   return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit' })
 }
 
+/** 游标分页响应信封（与后端 /api/request-logs 的返回结构一致） */
+export interface Paginated<T> {
+  items: T[]
+  nextCursor: string | null
+  hasMore: boolean
+  total?: number
+}
+
+/**
+ * 取分页列表并摊平为数组。
+ *
+ * 后端日志接口返回 { items, nextCursor } 信封（游标分页），前端多数场景只想渲染
+ * 当前这一页，故提供此helper 直接摊平，避免每个调用点都写 .items ?? []。
+ */
+export async function apiList<T>(path: string, options: RequestInit = {}): Promise<T[]> {
+  const data = await api<Paginated<T> | T[]>(path, options)
+  if (Array.isArray(data)) return data
+  return data.items ?? []
+}
+
 /** Token 数量人性化显示：1234 → 1.2k，5678901 → 5.7M */
 export function fmtTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M tok`

@@ -6,6 +6,8 @@ import type { OpenAIBody } from '@/lib/anthropic'
 import { getAdapter, resolveChatEndpoint } from '@/lib/adapters'
 import { redactSecrets } from '@/lib/redact'
 import { hitRateLimit } from '@/lib/rate-limit'
+import { log, withRequestId } from '@/lib/logger'
+import { resolveRequestId, openAiError } from '@/lib/api-response'
 
 const UPSTREAM_TIMEOUT_MS = 300_000 // 长回答 / 长流式给足时间
 const MAX_REQUEST_LOGS = 2000
@@ -18,10 +20,6 @@ interface UpstreamBody {
   [key: string]: unknown
   model?: string
   stream?: boolean
-}
-
-function openAiError(message: string, type: string, status: number, headers?: Record<string, string>): Response {
-  return Response.json({ error: { message, type, code: null } }, { status, headers })
 }
 
 /** 转发失败联动熔断：真实调用连续失败达到阈值 → 自动摘除（探测恢复后自动加回） */
@@ -47,7 +45,12 @@ async function recordForwardFailure(channelId: string, errorMsg: string): Promis
           data: { autoDisabled: true, autoDisabledAt: new Date() },
         })
         .catch(() => {})
-      console.warn(`[gateway] 渠道「${updated.name}」连续调用失败 ${updated.failStreak} 次，自动熔断摘除`)
+      log.warn('渠道连续调用失败，已自动熔断摘除', {
+        channelId: channelId,
+        channel: updated.name,
+        failStreak: updated.failStreak,
+        threshold,
+      })
     }
   } catch {
     /* 熔断联动失败不影响转发主流程 */
@@ -106,7 +109,7 @@ async function logRequest(data: {
       }
     }
   } catch (err) {
-    console.error('[gateway] logRequest failed:', err)
+    log.error('写入调用日志失败', { error: err })
   }
 }
 
@@ -193,6 +196,26 @@ export async function handleChatCompletions(
   req: Request,
   opts?: { adminOverride?: boolean }
 ): Promise<Response> {
+  // 为本次请求分配 ID，并在整个处理链路（转发/熔断/写日志）内透传，
+  // 这样一次调用产生的多条日志能被 requestId 串起来，便于排障。
+  const requestId = resolveRequestId(req)
+  const startedAt = Date.now()
+  const res = await withRequestId(requestId, () => dispatchChatCompletions(req, opts, requestId))
+  log.info('网关请求完成', {
+    requestId,
+    status: res.status,
+    durationMs: Date.now() - startedAt,
+    adminOverride: Boolean(opts?.adminOverride),
+  })
+  return res
+}
+
+/** 实际转发逻辑（由 handleChatCompletions 包装，注入 requestId 便于错误响应回传） */
+async function dispatchChatCompletions(
+  req: Request,
+  opts: { adminOverride?: boolean } | undefined,
+  requestId: string
+): Promise<Response> {
   // 1. 鉴权（管理员测试模式跳过统一 Key，不消耗配额）
   const adminOverride = Boolean(opts?.adminOverride)
   let token: { id: string; name: string; quotaLimit: number | null; quotaUsed: number; metadata?: unknown }
@@ -259,7 +282,7 @@ export async function handleChatCompletions(
         `请求过于频繁：该 Key 限速 ${perMin} 次/分钟，请稍后重试`,
         'rate_limit_error',
         429,
-        { 'Retry-After': '10' }
+        { headers: { 'Retry-After': '10' }, requestId }
       )
     }
   }
@@ -353,7 +376,7 @@ export async function handleChatCompletions(
     } catch (err) {
       // 客户端主动断开不是错误，无需重试后续渠道（用户已经不关心结果了）
       if (req.signal.aborted) {
-        console.log(`[gateway] 客户端已断开，中止对渠道「${ch.name}」的转发`)
+        log.info('客户端已断开，中止对上游的转发', { channel: ch.name, model: requestedModel })
         return new Response(null, { status: 499 })
       }
       const msg = err instanceof Error
@@ -468,7 +491,7 @@ export async function handleChatCompletions(
           } catch (err) {
             settled = true
             const msg = redactSecrets(`流式中断：${err instanceof Error ? err.message : String(err)}`, 200)
-            console.warn(`[gateway] ${msg}（已传 ${seen} 字节）`)
+            log.warn('流式传输中断', { channel: ch.name, bytesSent: seen, error: msg })
             try {
               controller.error(err)
             } catch {
@@ -482,7 +505,7 @@ export async function handleChatCompletions(
           if (settled) return
           settled = true
           await reader.cancel(reason).catch(() => {})
-          console.log(`[gateway] 客户端中断流式响应（已传 ${seen} 字节）`)
+          log.info('客户端中断流式响应', { channel: ch.name, bytesSent: seen })
           void logRequest({
             ...logBase,
             ok: false,
@@ -500,6 +523,8 @@ export async function handleChatCompletions(
     headers.set('Content-Type', contentType)
     headers.set('Cache-Control', 'no-cache')
     headers.set('X-Gateway-Channel', encodeURIComponent(ch.name))
+    // 回传请求 ID：客户端报障时截图/日志里就能直接定位到服务端那几条日志
+    headers.set('X-Request-Id', requestId)
     return new Response(resBody, { status: res.status, headers })
   }
 

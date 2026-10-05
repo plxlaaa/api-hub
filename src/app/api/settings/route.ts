@@ -1,5 +1,8 @@
 import { db } from '@/lib/db'
 import { requireAdmin } from '@/lib/auth'
+import { resolveRequestId, jsonOk, jsonBadRequest } from '@/lib/api-response'
+import { Validator, validationResponse } from '@/lib/validate'
+import { log } from '@/lib/logger'
 
 export const dynamic = 'force-dynamic'
 
@@ -18,24 +21,29 @@ export async function GET(req: Request) {
 }
 
 export async function PUT(req: Request) {
+  const requestId = resolveRequestId(req)
   const denied = await requireAdmin(req)
   if (denied) return denied
   const body = await req.json().catch(() => null)
-  if (!body) return Response.json({ error: '请求体非法' }, { status: 400 })
+  if (!body) return jsonBadRequest('请求体非法', requestId)
+
+  const v = new Validator(body)
+  const circuitBreaker = v.boolean('circuitBreaker')
+  const cbThreshold = v.integer('cbThreshold', { min: 1, max: 100 })
+  if (v.failed()) return validationResponse(v)
 
   const updates: Array<{ key: string; value: string }> = []
-  if (typeof body.circuitBreaker === 'boolean') {
-    updates.push({ key: 'circuitBreaker', value: body.circuitBreaker ? 'on' : 'off' })
+  if (circuitBreaker !== undefined) {
+    updates.push({ key: 'circuitBreaker', value: circuitBreaker ? 'on' : 'off' })
   }
-  if (body.cbThreshold !== undefined) {
-    const n = Number(body.cbThreshold)
-    if (!Number.isFinite(n) || n < 1) return Response.json({ error: '阈值必须 ≥ 1' }, { status: 400 })
-    updates.push({ key: 'cbThreshold', value: String(Math.floor(n)) })
+  if (cbThreshold !== undefined) {
+    updates.push({ key: 'cbThreshold', value: String(cbThreshold) })
   }
-  if (updates.length === 0) return Response.json({ error: '无可更新字段' }, { status: 400 })
+  if (updates.length === 0) return jsonBadRequest('无可更新字段', requestId)
 
   for (const u of updates) {
     await db.setting.upsert({ where: { key: u.key }, update: { value: u.value }, create: { key: u.key, value: u.value } })
   }
-  return Response.json({ ok: true })
+  log.info('网关设置已更新', { requestId, fields: updates.map((u) => u.key).join(',') })
+  return jsonOk({ ok: true }, { requestId })
 }

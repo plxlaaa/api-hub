@@ -110,8 +110,10 @@ function Wait-Healthy {
     while ($i -lt 90) {
         Start-Sleep -Seconds 1; $i++
         try {
-            $r = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/" -UseBasicParsing -TimeoutSec 3
-            Ok "服务已就绪（${i}s，HTTP $($r.StatusCode)）：http://127.0.0.1:$Port"
+            # 用 /api/health 而非 /：后者是前端页面，DB 挂了照样 200，
+            # 会让安装脚本在数据库不可用时误报「已就绪」。
+            $r = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/health" -UseBasicParsing -TimeoutSec 3
+            Ok "服务已就绪（${i}s，数据库就绪）：http://127.0.0.1:$Port"
             return
         } catch { }
     }
@@ -149,7 +151,9 @@ function Show-Status {
         Write-Host ""; Ok "管理员已初始化，直接用用户名+密码登录"
     }
     try {
-        $r = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/auth/status" -UseBasicParsing -TimeoutSec 5
+        # 用 /api/health 而非 /api/auth/status：前者会真正探测数据库可读写，
+        # 后者只反映「是否已初始化」，DB 挂了照样 200。
+        $r = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/health" -UseBasicParsing -TimeoutSec 5
         Ok "健康检查通过：HTTP $($r.StatusCode) → http://127.0.0.1:$Port"
     } catch { Warn "健康检查未通过：$($_.Exception.Message)" }
     exit 0
@@ -346,8 +350,10 @@ function Start-App {
     while ($i -lt 60) {
         Start-Sleep -Seconds 1; $i++
         try {
-            $r = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/" -UseBasicParsing -TimeoutSec 3
-            Ok "服务已就绪（${i}s，HTTP $($r.StatusCode)）：http://127.0.0.1:$Port"
+            # 用 /api/health 而非 /：后者是前端页面，DB 挂了照样 200，
+            # 会让安装脚本在数据库不可用时误报「已就绪」。
+            $r = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/health" -UseBasicParsing -TimeoutSec 3
+            Ok "服务已就绪（${i}s，数据库就绪）：http://127.0.0.1:$Port"
             return
         } catch { }
     }

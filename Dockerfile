@@ -93,8 +93,9 @@ VOLUME ["/app/db"]
 USER nextjs
 EXPOSE 3000
 
-# 健康检查：探针接口无需鉴权
+# 健康检查：/api/health 无需鉴权，且会真正探测数据库可读写
+# （早期用的 /api/auth/status 只反映「是否已初始化」，DB 挂了仍返回 200）
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
-  CMD curl -fsS "http://127.0.0.1:${PORT}/api/auth/status" || exit 1
+  CMD curl -fsS "http://127.0.0.1:${PORT}/api/health" || exit 1
 
 CMD ["node", "server.js"]
