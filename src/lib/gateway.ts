@@ -8,6 +8,7 @@ import { redactSecrets } from '@/lib/redact'
 import { hitRateLimit } from '@/lib/rate-limit'
 import { log, withRequestId } from '@/lib/logger'
 import { resolveRequestId, openAiError } from '@/lib/api-response'
+import { resolveRoute, shouldTripBreaker } from '@/lib/route-resolver'
 
 const UPSTREAM_TIMEOUT_MS = 300_000 // 长回答 / 长流式给足时间
 const MAX_REQUEST_LOGS = 2000
@@ -22,9 +23,16 @@ interface UpstreamBody {
   stream?: boolean
 }
 
-/** 转发失败联动熔断：真实调用连续失败达到阈值 → 自动摘除（探测恢复后自动加回） */
-async function recordForwardFailure(channelId: string, errorMsg: string): Promise<void> {
+/** 转发失败联动熔断：真实调用连续失败达到阈值 → 自动摘除（探测恢复后自动加回）。
+ *  trip=false 时只记录 lastError 不累计 failStreak（用于客户端侧/瞬时错误，判定见 shouldTripBreaker）。 */
+async function recordForwardFailure(channelId: string, errorMsg: string, trip = true): Promise<void> {
   try {
+    if (!trip) {
+      await db.channel
+        .update({ where: { id: channelId }, data: { lastError: redactSecrets(errorMsg, 300) } })
+        .catch(() => {})
+      return
+    }
     const [cbOn, cbThreshold] = await Promise.all([
       db.setting.findUnique({ where: { key: 'circuitBreaker' } }),
       db.setting.findUnique({ where: { key: 'cbThreshold' } }),
@@ -287,18 +295,23 @@ async function dispatchChatCompletions(
     }
   }
 
-  // 5. 路由解析：精确匹配 → 最长前缀通配（"gpt-*"）→ 兜底（"*"）
-  const enabledRoutes = await db.modelRoute.findMany({ where: { enabled: true } })
-  const exact = enabledRoutes.find((r) => r.displayName === requestedModel)
-  const prefixHit = enabledRoutes
-    .filter((r) => r.displayName.endsWith('*') && r.displayName.length > 1)
-    .map((r) => ({ r, prefix: r.displayName.slice(0, -1) }))
-    .filter((x) => requestedModel.startsWith(x.prefix))
-    .sort((a, b) => b.prefix.length - a.prefix.length)[0]
-  const fallback = enabledRoutes.find((r) => r.displayName === '*')
-  const route = exact ?? prefixHit?.r ?? fallback ?? null
-  if (!route) {
-    return openAiError(`模型 "${requestedModel}" 不存在或未启用（可在管理台配置 "gpt-*" 前缀通配或 "*" 兜底路由承接未知模型）`, 'invalid_request_error', 404)
+  // 5. 路由解析 v2（route-resolver）：精确 → 正则（re:xxx）→ 最长前缀（gpt-*）→ 兜底（*），
+  //    同特异性按 metadata.priority 决胜；密钥准入（allow/denyTokens）不通过则自动降级到下一候选
+  const enabledRoutes = await db.modelRoute.findMany({ where: { enabled: true }, orderBy: { createdAt: 'asc' } })
+  const resolved = resolveRoute(enabledRoutes, requestedModel, { tokenName: token.name })
+  if (resolved.kind === 'none') {
+    return openAiError(resolved.reason, 'invalid_request_error', 404)
+  }
+  if (resolved.kind === 'denied') {
+    return openAiError(resolved.reason, 'permission_error', 403)
+  }
+  const route = resolved.route
+  const routeMeta = (route.metadata ?? {}) as Record<string, unknown>
+  // 故障转移上限：metadata.maxAttempts 限制最多试几个渠道（默认不限，全部候选）
+  const maxAttemptsRaw = Number(routeMeta.maxAttempts)
+  const maxAttempts = Number.isFinite(maxAttemptsRaw) && maxAttemptsRaw >= 1 ? Math.floor(maxAttemptsRaw) : Infinity
+  if (resolved.reason !== '精确匹配') {
+    log.info('路由命中', { requested: requestedModel, route: route.displayName, via: resolved.reason })
   }
 
   // 6. 渠道配置解析（渠道级模型映射 + 权重）；熔断中的渠道自动跳过
@@ -319,13 +332,21 @@ async function dispatchChatCompletions(
   }
 
   // 负载均衡策略：按策略生成尝试顺序（与预览 API 共用同一实现）
-  const { ordered } = await orderCandidates(candidates, route.strategy as RouteStrategy)
+  const { ordered } = await orderCandidates(candidates, route.strategy as RouteStrategy, {
+    tokenKey: token.id || undefined,
+    model: requestedModel,
+  })
 
   // 7. 逐渠道转发（故障转移；每个渠道用自己映射的模型名）
   const isStream = Boolean(body.stream)
   const failures: string[] = []
 
   for (const [tryIdx, { cfg, ch }] of ordered.entries()) {
+    // 故障转移上限：metadata.maxAttempts 限制最多实际尝试的渠道数（省时省日志，防止坏请求烧穿全部渠道）
+    if (tryIdx >= maxAttempts) {
+      log.info('已达路由故障转移上限，停止尝试更多渠道', { route: route.displayName, maxAttempts, tried: tryIdx })
+      break
+    }
     // 渠道级模型映射优先；路由 targetModel 为 "*" 时透传客户端请求的模型名（配合通配/兜底路由）
     const modelForChannel = cfg.model?.trim() || (route.targetModel === '*' ? requestedModel : route.targetModel)
     // 协议适配器：请求构造/头/响应转换全部由适配器负责（新协议注册即用，主流程零改动）
@@ -390,6 +411,9 @@ async function dispatchChatCompletions(
     }
 
     if (!res.ok) {
+      // 智能熔断：只有渠道侧问题（5xx/401/403/408）才累计 failStreak；
+      // 客户端侧（400/422）、模型映射（404）、瞬时（429）只记 lastError 不惩罚渠道。
+      const trip = shouldTripBreaker(res.status)
       // 上游错误体可能回显 Key（如 "Invalid API key: sk-xxx"）或暴露内网地址，
       // 必须脱敏后再进日志与返回体，避免把上游凭据泄漏给任何持有网关 Key 的调用方。
       const raw = await res.text().catch(() => '')
@@ -397,7 +421,7 @@ async function dispatchChatCompletions(
       const msg = `HTTP ${res.status}${detail ? ` ${detail}` : ''}`
       failures.push(`[${ch.name}] ${msg}`)
       const latencyMs = Date.now() - start
-      void recordForwardFailure(ch.id, msg)
+      void recordForwardFailure(ch.id, msg, trip)
       void logRequest({ channelName: ch.name, model: requestedModel, targetModel: modelForChannel, ok: false, statusCode: res.status, latencyMs, tokenName: token.name, stream: isStream, attempt: tryIdx + 1, error: msg })
       continue
     }

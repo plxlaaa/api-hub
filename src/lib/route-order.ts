@@ -1,5 +1,5 @@
-import { db } from '@/lib/db'
 import type { ChannelConfig } from '@/lib/route-config'
+import { inActiveHours } from './route-config.ts'
 import type { Channel } from '@prisma/client'
 
 export interface Candidate {
@@ -7,9 +7,16 @@ export interface Candidate {
   ch: Channel
 }
 
-export type RouteStrategy = 'priority' | 'weighted' | 'speed' | 'quality' | 'stability' | 'cost'
+/** 排序上下文：粘性策略需要调用方身份 + 模型名做稳定哈希 */
+export interface OrderContext {
+  tokenKey?: string // 稳定标识（token id 或 key），同一调用方粘同一渠道
+  model?: string // 请求的模型名，参与哈希（不同模型可落不同渠道）
+  rand?: number // 注入随机数（0-1），单测可复现分流结果；缺省 Math.random()
+}
 
-export const STRATEGIES: RouteStrategy[] = ['priority', 'weighted', 'speed', 'quality', 'stability', 'cost']
+export type RouteStrategy = 'priority' | 'weighted' | 'speed' | 'quality' | 'stability' | 'cost' | 'sticky' | 'percent'
+
+export const STRATEGIES: RouteStrategy[] = ['priority', 'weighted', 'speed', 'quality', 'stability', 'cost', 'sticky', 'percent']
 
 export const STRATEGY_LABELS: Record<RouteStrategy, string> = {
   priority: '优先级',
@@ -18,6 +25,8 @@ export const STRATEGY_LABELS: Record<RouteStrategy, string> = {
   quality: '质量优先',
   stability: '稳定性优先',
   cost: '成本优先',
+  sticky: '会话粘性',
+  percent: '百分比分流',
 }
 
 export function normalizeStrategy(v: unknown): RouteStrategy {
@@ -29,7 +38,7 @@ export function normalizeStrategy(v: unknown): RouteStrategy {
  * 新增策略三步：① RouteStrategy 联合类型加名字 ② 实现排序函数 ③ 注册进 STRATEGY_REGISTRY + 写 basis 文案。
  * 网关转发与预览共用 orderCandidates，保证预览=实际行为。
  */
-type StrategyFn = (candidates: Candidate[]) => Candidate[] | Promise<Candidate[]>
+type StrategyFn = (candidates: Candidate[], ctx?: OrderContext) => Candidate[] | Promise<Candidate[]>
 
 /** 权重随机：不放回加权抽样（随机性导致预览每次可能不同） */
 const weightedStrategy: StrategyFn = (candidates) => {
@@ -92,6 +101,8 @@ const stabilityStrategy: StrategyFn = async (candidates) => {
   if (stabilityCache && now - stabilityCache.at < STABILITY_CACHE_TTL_MS) {
     rates = stabilityCache.rates
   } else {
+    // 惰性导入 db：让本模块保持「无顶层重依赖」，路由规则单测可以直接 import 纯函数部分
+    const { db } = await import('@/lib/db')
     const since = new Date(now - 7 * 24 * 3600_000)
     const grouped = await db.requestLog.groupBy({
       by: ['channelName', 'ok'],
@@ -152,6 +163,50 @@ const costStrategy: StrategyFn = (candidates) => {
   })
 }
 
+/**
+ * 会话粘性：稳定哈希（FNV-1a）决定主渠道，同一 (tokenKey, model) 永远落同一渠道。
+ *
+ * 价值：多轮对话的上游 KV 缓存按渠道会话缓存，每次换渠道缓存全失效（慢 + 贵）。
+ * 粘住渠道后缓存命中率高。渠道挂掉时自然漂移到后备（列表里下一个），恢复后回粘。
+ */
+export function fnv1a(str: string): number {
+  let h = 0x811c9dc5
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i)
+    h = Math.imul(h, 0x01000193)
+  }
+  return h >>> 0
+}
+
+const stickyStrategy: StrategyFn = (candidates, ctx) => {
+  if (candidates.length <= 1) return candidates
+  const key = `${ctx?.tokenKey ?? 'anonymous'}|${ctx?.model ?? ''}`
+  const idx = fnv1a(key) % candidates.length
+  // 主渠道提到首位，其余保持配置顺序做后备
+  return [candidates[idx], ...candidates.filter((_, i) => i !== idx)]
+}
+
+/**
+ * 百分比分流（A/B 灰度）：按 cfg.percent 归一化加权随机选主，其余按配置顺序做后备。
+ * 与 weighted 的区别：percent 是明确的流量占比语义（总和归一化），weight 是相对权重；
+ * 且 percent=0 的渠道永不做主、只当后备 —— 正好用来做「5% 试新渠道，其余保底」。
+ */
+const percentStrategy: StrategyFn = (candidates, ctx) => {
+  const weighted = candidates.map((c) => ({ c, w: c.cfg.percent ?? 1 }))
+  const total = weighted.reduce((s, x) => s + x.w, 0)
+  if (!Number.isFinite(total) || total <= 0 || candidates.length <= 1) return candidates
+  let pick = (ctx?.rand ?? Math.random()) * total
+  let primary = candidates[candidates.length - 1] // 全 0 兜底
+  for (const x of weighted) {
+    pick -= x.w
+    if (pick <= 0 && x.w > 0) {
+      primary = x.c
+      break
+    }
+  }
+  return [primary, ...candidates.filter((c) => c !== primary)]
+}
+
 const STRATEGY_REGISTRY: Record<RouteStrategy, StrategyFn> = {
   priority: priorityStrategy,
   weighted: weightedStrategy,
@@ -159,6 +214,8 @@ const STRATEGY_REGISTRY: Record<RouteStrategy, StrategyFn> = {
   quality: qualityStrategy,
   stability: stabilityStrategy,
   cost: costStrategy,
+  sticky: stickyStrategy,
+  percent: percentStrategy,
 }
 
 /** 每个策略的排序依据说明（预览展示用）；新策略记得补一条文案 */
@@ -172,18 +229,40 @@ const BASIS_LABEL: Partial<Record<RouteStrategy, (c: Candidate, pos: number) => 
     if (typeof m.priceIn !== 'number' && typeof m.priceOut !== 'number') return '未标注价格 · 排最后'
     return `¥ ${m.priceIn ?? '?'}/${m.priceOut ?? '?'} 每百万tok`
   },
+  sticky: (c) => (c.cfg.model ? `会话哈希 · 独立模型 ${c.cfg.model}` : '会话哈希稳定选主'),
+  percent: (c) => `流量占比 ${c.cfg.percent ?? 100}%`,
 }
 
-export async function orderCandidates(candidates: Candidate[], strategy: RouteStrategy): Promise<{ ordered: Candidate[]; basis: Map<string, string> }> {
+export async function orderCandidates(
+  candidates: Candidate[],
+  strategy: RouteStrategy,
+  ctx?: OrderContext
+): Promise<{ ordered: Candidate[]; basis: Map<string, string> }> {
   const basis = new Map<string, string>()
   const fn = STRATEGY_REGISTRY[strategy] ?? STRATEGY_REGISTRY.priority
-  const ordered = await fn(candidates)
+  let ordered = await fn(candidates, ctx)
+
+  // 时段窗口管线：窗口外的渠道退到队尾做后备（不摘除 —— 挂了总比没有强）。
+  // 对所有策略生效（priority 粘性等都要尊重「凌晨走便宜渠道」这类配置）。
+  const inWindow: Candidate[] = []
+  const outOfWindow: Candidate[] = []
+  const now = new Date()
+  for (const x of ordered) {
+    if (x.cfg.activeHours && !inActiveHours(x.cfg.activeHours, now)) outOfWindow.push(x)
+    else inWindow.push(x)
+  }
+  if (outOfWindow.length > 0) {
+    ordered = [...inWindow, ...outOfWindow]
+    for (const x of outOfWindow) basis.set(`window:${x.ch.id}`, `窗口 ${x.cfg.activeHours} 外 · 后备`)
+  }
 
   // 生成每个渠道的排序依据说明（预览展示用）
   const label = BASIS_LABEL[strategy]
   for (let i = 0; i < ordered.length; i++) {
     const x = ordered[i]
-    basis.set(x.ch.id, label ? label(x, i) : `优先级 #${i + 1}`)
+    const suffix = basis.get(`window:${x.ch.id}`) ?? ''
+    const text = label ? label(x, i) : `优先级 #${i + 1}`
+    basis.set(x.ch.id, suffix ? `${text} · ${suffix}` : text)
   }
   return { ordered, basis }
 }

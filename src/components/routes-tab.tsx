@@ -100,7 +100,7 @@ export function RoutesTab() {
       id: r.id,
       displayName: r.displayName,
       targetModel: r.targetModel,
-      channelConfigs: r.channelConfigs.map((c) => ({ id: c.id, model: c.model || '', weight: c.weight ?? 1, quality: c.quality ?? 5 })),
+      channelConfigs: r.channelConfigs.map((c) => ({ id: c.id, model: c.model || '', weight: c.weight ?? 1, quality: c.quality ?? 5, percent: c.percent ?? 100, activeHours: c.activeHours || '' })),
       strategy: r.strategy,
       priceIn: r.priceIn == null ? '' : String(r.priceIn),
       priceOut: r.priceOut == null ? '' : String(r.priceOut),
@@ -142,7 +142,7 @@ export function RoutesTab() {
       ...f,
       channelConfigs: f.channelConfigs.some((c) => c.id === id)
         ? f.channelConfigs.filter((c) => c.id !== id)
-        : [...f.channelConfigs, { id, model: '', weight: 1, quality: 5 }],
+        : [...f.channelConfigs, { id, model: '', weight: 1, quality: 5, percent: 100, activeHours: '' }],
     }))
   }
   const move = (index: number, dir: -1 | 1) => {
@@ -172,6 +172,8 @@ export function RoutesTab() {
           ...(c.model?.trim() ? { model: c.model.trim() } : {}),
           weight: Math.max(0, Math.min(100, Math.round(Number(c.weight) || 0))),
           quality: Math.max(1, Math.min(10, Math.round(Number(c.quality) || 5))),
+          percent: Math.max(0, Math.min(100, Math.round(Number(c.percent ?? 100) || 0))),
+          ...(String(c.activeHours || '').trim() ? { activeHours: String(c.activeHours).trim() } : {}),
         })),
         remark: f.remark || null,
         priceIn: f.priceIn.trim() === '' ? null : Number(f.priceIn),
@@ -455,6 +457,8 @@ export function RoutesTab() {
                   <SelectItem value="quality">🧠 智商优先 —— 优先用智商分高的模型</SelectItem>
                   <SelectItem value="stability">🛡️ 稳定优先 —— 按近期成功率排序</SelectItem>
                   <SelectItem value="cost">💰 成本优先 —— 按渠道标注价格升序</SelectItem>
+                  <SelectItem value="sticky">📌 会话粘性 —— 同一密钥稳定粘住同一渠道（缓存友好）</SelectItem>
+                  <SelectItem value="percent">🧪 百分比分流 —— 按渠道流量占比灰度切流</SelectItem>
                 </SelectContent>
               </Select>
               <p className="text-xs text-muted-foreground">{STRATEGY_META[form.strategy].desc}</p>
@@ -530,6 +534,7 @@ export function RoutesTab() {
                   {form.strategy === 'priority' && '（优先级顺序）'}
                   {form.strategy === 'weighted' && '（权重分流）'}
                   {form.strategy === 'quality' && '（标注智商分 1-10）'}
+                  {form.strategy === 'percent' && '（配置流量占比 %，0 = 只当后备）'}
                 </Label>
                 <div className="space-y-1">
                   {form.channelConfigs.map((cfg, i) => (
@@ -581,6 +586,26 @@ export function RoutesTab() {
                             />
                           </div>
                         )}
+                        {form.strategy === 'percent' && (
+                          <div className="space-y-0.5 w-24">
+                            <p className="text-xs text-muted-foreground">流量占比 %</p>
+                            <Input
+                              className="h-8 text-xs"
+                              type="number" min={0} max={100} step={1}
+                              value={cfg.percent ?? 100}
+                              onChange={(e) => updateCfg(cfg.id, { percent: Number(e.target.value) })}
+                            />
+                          </div>
+                        )}
+                        <div className="space-y-0.5 w-32">
+                          <p className="text-xs text-muted-foreground">时段窗口（可选）</p>
+                          <Input
+                            className="h-8 text-xs"
+                            placeholder="如 22:00-06:00"
+                            value={cfg.activeHours || ''}
+                            onChange={(e) => updateCfg(cfg.id, { activeHours: e.target.value })}
+                          />
+                        </div>
                       </div>
                       {form.strategy === 'speed' && (
                         <p className="mt-1.5 text-xs text-muted-foreground">

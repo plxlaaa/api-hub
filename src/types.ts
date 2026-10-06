@@ -23,9 +23,11 @@ export interface RouteChannelConfig {
   model?: string // 该渠道实际模型名，缺省用路由 targetModel
   weight?: number // 权重策略下的随机权重，缺省 1
   quality?: number // 智商分 1-10，智商优先策略用，缺省 5
+  percent?: number // 流量占比 0-100（百分比分流策略），0=只当后备
+  activeHours?: string // 时段窗口 "HH:MM-HH:MM"，窗口外渠道退为后备
 }
 
-export type RouteStrategy = 'priority' | 'weighted' | 'speed' | 'quality' | 'stability' | 'cost'
+export type RouteStrategy = 'priority' | 'weighted' | 'speed' | 'quality' | 'stability' | 'cost' | 'sticky' | 'percent'
 
 export interface ModelRoute {
   id: string
