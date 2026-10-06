@@ -3,6 +3,7 @@ import { requireAdmin } from '@/lib/auth'
 import { normalizeChannelConfigs, normalizeStrategy, parseChannelConfigs } from '@/lib/route-config'
 import { parseMetadata } from '@/lib/metadata'
 import { parseStringArray } from '@/lib/json-field'
+import { resolveRequestId, jsonOk, jsonBadRequest, jsonError } from '@/lib/api-response'
 
 export const dynamic = 'force-dynamic'
 
@@ -62,23 +63,24 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   const denied = await requireAdmin(req)
   if (denied) return denied
+  const requestId = resolveRequestId(req)
   const body = await req.json().catch(() => null)
-  if (!body) return Response.json({ error: '请求体非法' }, { status: 400 })
+  if (!body) return jsonBadRequest('请求体非法', requestId)
 
   const { displayName, targetModel, channelIds, channelConfigs, remark, enabled, strategy, priceIn, priceOut, metadata } = body as Record<string, unknown>
   if (typeof displayName !== 'string' || !displayName.trim()) {
-    return Response.json({ error: '模型显示名必填' }, { status: 400 })
+    return jsonBadRequest('模型显示名必填', requestId)
   }
   if (typeof targetModel !== 'string' || !targetModel.trim()) {
-    return Response.json({ error: '上游真实模型名必填' }, { status: 400 })
+    return jsonBadRequest('上游真实模型名必填', requestId)
   }
   // channelConfigs 优先；兼容旧的 channelIds
   const cfgs = normalizeChannelConfigs(channelConfigs)
     ?? normalizeChannelConfigs((Array.isArray(channelIds) ? channelIds : []).map((id) => ({ id })))
-  if (!cfgs) return Response.json({ error: '至少选择一个渠道' }, { status: 400 })
+  if (!cfgs) return jsonBadRequest('至少选择一个渠道', requestId)
 
   const exists = await db.modelRoute.findUnique({ where: { displayName: displayName.trim() } })
-  if (exists) return Response.json({ error: `模型显示名 "${displayName.trim()}" 已存在` }, { status: 409 })
+  if (exists) return jsonError(409, `模型显示名 "${displayName.trim()}" 已存在`, requestId)
 
   const m = parseMetadata(metadata)
   const route = await db.modelRoute.create({
@@ -95,5 +97,5 @@ export async function POST(req: Request) {
       ...(m ? { metadata: m } : {}),
     },
   })
-  return Response.json({ id: route.id })
+  return jsonOk({ id: route.id }, { requestId })
 }

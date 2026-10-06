@@ -3,6 +3,7 @@ import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto'
 import { db } from '@/lib/db'
 import { loadCredentials, saveCredentials } from '@/lib/credentials'
 import { checkRateLimit, hitRateLimit, resetRateLimit } from '@/lib/rate-limit'
+import { resolveRequestId, jsonUnauthorized } from '@/lib/api-response'
 
 const SETTING_JWT_SECRET = 'jwtSecret'
 const TOKEN_EXPIRES = '30d'
@@ -129,19 +130,20 @@ function tokenFromRequest(req: Request): string {
 
 export async function requireAdmin(req: Request): Promise<Response | null> {
   const token = tokenFromRequest(req)
-  if (!token) return unauthorized()
+  if (!token) return unauthorized(req)
   try {
     // 显式限定算法：不给 algorithms 时 jwtVerify 会按 token 头里的 alg 尝试验签，
     // 存在算法混淆风险（如 alg=none 或非对称算法误配）
     await jwtVerify(token, await getJwtSecret(), { algorithms: ['HS256'] })
     return null
   } catch {
-    return unauthorized()
+    return unauthorized(req)
   }
 }
 
-export function unauthorized(): Response {
-  return Response.json({ error: '未登录或登录已过期' }, { status: 401 })
+/** 401 统一出口：带 X-Request-Id 响应头与 requestId 字段，便于客户端报错与服务端日志对上 */
+export function unauthorized(req?: Request): Response {
+  return jsonUnauthorized(req ? resolveRequestId(req) : undefined)
 }
 
 // ---------- 初始化 / 登录 ----------

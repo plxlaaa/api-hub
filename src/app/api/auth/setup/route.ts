@@ -1,5 +1,6 @@
 import { isInitialized, setupAdmin, withSessionCookie, jsonWithCookie } from '@/lib/auth'
 import { verifySetupToken, consumeSetupToken } from '@/lib/credentials'
+import { resolveRequestId, jsonError } from '@/lib/api-response'
 
 export const dynamic = 'force-dynamic'
 
@@ -7,28 +8,30 @@ export const dynamic = 'force-dynamic'
 const USERNAME_RE = /^[A-Za-z0-9_一-龥.\-]+$/
 
 export async function POST(req: Request) {
+  const requestId = resolveRequestId(req)
   const { username, password, setupToken } = await req
     .json()
     .catch(() => ({ username: '', password: '', setupToken: '' }))
   const name = typeof username === 'string' ? username.trim() : ''
   if (name.length < 2 || name.length > 32) {
-    return Response.json({ error: '用户名需 2-32 位' }, { status: 400 })
+    return jsonError(400, '用户名需 2-32 位', requestId)
   }
   if (!USERNAME_RE.test(name)) {
-    return Response.json({ error: '用户名仅含字母/数字/中文/._-' }, { status: 400 })
+    return jsonError(400, '用户名仅含字母/数字/中文/._-', requestId)
   }
   if (typeof password !== 'string' || password.length < 4) {
-    return Response.json({ error: '管理密码至少 4 位' }, { status: 400 })
+    return jsonError(400, '管理密码至少 4 位', requestId)
   }
   if (await isInitialized()) {
-    return Response.json({ error: '管理员已设置，请直接登录' }, { status: 409 })
+    return jsonError(409, '管理员已设置，请直接登录', requestId)
   }
   // 一次性设置令牌校验（防公网暴露时被抢注）：令牌只在本机 db/setup-token.txt / 控制台
   const ok = await verifySetupToken(typeof setupToken === 'string' ? setupToken : '')
   if (!ok) {
-    return Response.json(
-      { error: '设置令牌无效。请在本机查看 db/setup-token.txt（或服务器启动日志）后粘贴' },
-      { status: 401 }
+    return jsonError(
+      401,
+      '设置令牌无效。请在本机查看 db/setup-token.txt（或服务器启动日志）后粘贴',
+      requestId
     )
   }
   const token = await setupAdmin(name, password)

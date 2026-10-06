@@ -1,6 +1,7 @@
 import { db } from '@/lib/db'
 import { requireAdmin } from '@/lib/auth'
 import { normalizeBaseUrl } from '@/lib/probe'
+import { resolveRequestId, jsonBadRequest } from '@/lib/api-response'
 
 export const dynamic = 'force-dynamic'
 
@@ -10,9 +11,10 @@ export const dynamic = 'force-dynamic'
 export async function POST(req: Request) {
   const denied = await requireAdmin(req)
   if (denied) return denied
+  const requestId = resolveRequestId(req)
   const body = await req.json().catch(() => null)
   const text = typeof (body as Record<string, unknown> | null)?.text === 'string' ? (body as { text: string }).text : ''
-  if (!text.trim()) return Response.json({ error: '导入内容为空' }, { status: 400 })
+  if (!text.trim()) return jsonBadRequest('导入内容为空', requestId)
 
   // 已有渠道名集合（同名跳过，避免重复建渠道）
   const existing = new Set((await db.channel.findMany({ select: { name: true } })).map((c) => c.name))

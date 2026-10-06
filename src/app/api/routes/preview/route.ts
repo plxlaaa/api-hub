@@ -1,6 +1,7 @@
 import { db } from '@/lib/db'
 import { requireAdmin } from '@/lib/auth'
 import { normalizeStrategy, orderCandidates, type Candidate } from '@/lib/route-order'
+import { resolveRequestId, jsonBadRequest } from '@/lib/api-response'
 
 export const dynamic = 'force-dynamic'
 
@@ -9,9 +10,10 @@ export const dynamic = 'force-dynamic'
 export async function POST(req: Request) {
   const denied = await requireAdmin(req)
   if (denied) return denied
+  const requestId = resolveRequestId(req)
   const body = await req.json().catch(() => null)
   if (!body || !Array.isArray(body.channelConfigs) || body.channelConfigs.length === 0) {
-    return Response.json({ error: 'channelConfigs 不能为空' }, { status: 400 })
+    return jsonBadRequest('channelConfigs 不能为空', requestId)
   }
   const strategy = normalizeStrategy(body.strategy)
   const ids = (body.channelConfigs as Array<{ id?: unknown }>).map((c) => String(c.id)).filter(Boolean)
@@ -38,5 +40,5 @@ export async function POST(req: Request) {
       basis: basis.get(x.ch.id) || '',
     })),
     unavailable,
-  })
+  }, { headers: { 'X-Request-Id': requestId } })
 }

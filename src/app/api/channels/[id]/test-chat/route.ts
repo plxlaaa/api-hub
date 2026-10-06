@@ -4,6 +4,7 @@ import { db } from '@/lib/db'
 import { getAdapter, resolveChatEndpoint } from '@/lib/adapters'
 import { redactSecrets } from '@/lib/redact'
 import { parseStringArray } from '@/lib/json-field'
+import { resolveRequestId, openAiError, jsonError } from '@/lib/api-response'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 300
@@ -15,17 +16,18 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   const denied = await requireAdmin(req)
   if (denied) return denied
   const { id } = await params
+  const requestId = resolveRequestId(req)
   const body = (await req.json().catch(() => ({}))) as Record<string, unknown>
   const { model } = body
 
   // 对话模式：带 messages 时直连该渠道转发（支持流式），不联动熔断（管理员手动测试）
   if (Array.isArray(body.messages) && body.messages.length > 0) {
     const ch = await db.channel.findUnique({ where: { id } })
-    if (!ch) return Response.json({ error: { message: '渠道不存在', type: 'invalid_request_error' } }, { status: 404 })
+    if (!ch) return openAiError('渠道不存在', 'invalid_request_error', 404, { requestId })
     const models = parseStringArray(ch.models)
     const target = (typeof model === 'string' && model.trim()) || models[0] || ''
     if (!target) {
-      return Response.json({ error: { message: '渠道未配置支持模型', type: 'invalid_request_error' } }, { status: 400 })
+      return openAiError('渠道未配置支持模型', 'invalid_request_error', 400, { requestId })
     }
     const isStream = Boolean(body.stream)
     // 三种协议统一走适配器：anthropic/gemini 自动转换请求与响应，
@@ -43,10 +45,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
       })
       if (!res.ok) {
         const text = redactSecrets(await res.text().catch(() => ''), 200)
-        return Response.json(
-          { error: { message: `HTTP ${res.status}${text ? ` ${text}` : ''}`, type: 'upstream_error' } },
-          { status: 502 }
-        )
+        return openAiError(`HTTP ${res.status}${text ? ` ${text}` : ''}`, 'upstream_error', 502, { requestId })
       }
       const headers = new Headers()
       headers.set('Content-Type', isStream ? 'text/event-stream' : res.headers.get('content-type') || 'application/json')
@@ -70,7 +69,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
         err instanceof Error
           ? (err.name === 'TimeoutError' ? `上游超时（${TEST_TIMEOUT_MS / 1000}s）` : redactSecrets(err.message, 200))
           : redactSecrets(err, 200)
-      return Response.json({ error: { message: msg, type: 'upstream_error' } }, { status: 502 })
+      return openAiError(msg, 'upstream_error', 502, { requestId })
     }
   }
 
@@ -81,9 +80,6 @@ export async function POST(req: Request, { params }: { params: Promise<{ id: str
   } catch (err) {
     // 渠道不存在 → 404；其余（DB 锁、文件系统异常等）→ 500，不要一律报 404 掩盖真实故障
     const notFound = err instanceof Error && err.message === '渠道不存在'
-    return Response.json(
-      { error: err instanceof Error ? err.message : '测试失败' },
-      { status: notFound ? 404 : 500 }
-    )
+    return jsonError(notFound ? 404 : 500, err instanceof Error ? err.message : '测试失败', requestId)
   }
 }

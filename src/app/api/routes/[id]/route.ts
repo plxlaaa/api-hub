@@ -1,6 +1,7 @@
 import { db } from '@/lib/db'
 import { requireAdmin } from '@/lib/auth'
 import { normalizeChannelConfigs, normalizeStrategy } from '@/lib/route-config'
+import { resolveRequestId, jsonOk, jsonBadRequest, jsonError } from '@/lib/api-response'
 
 export const dynamic = 'force-dynamic'
 
@@ -18,16 +19,17 @@ export async function PUT(req: Request, { params }: Params) {
   const denied = await requireAdmin(req)
   if (denied) return denied
   const { id } = await params
+  const requestId = resolveRequestId(req)
   const body = await req.json().catch(() => null)
-  if (!body) return Response.json({ error: '请求体非法' }, { status: 400 })
+  if (!body) return jsonBadRequest('请求体非法', requestId)
 
   const route = await db.modelRoute.findUnique({ where: { id } })
-  if (!route) return Response.json({ error: '路由不存在' }, { status: 404 })
+  if (!route) return jsonError(404, '路由不存在', requestId)
 
   const data: Record<string, unknown> = {}
   if (typeof body.displayName === 'string' && body.displayName.trim()) {
     const dup = await db.modelRoute.findFirst({ where: { displayName: body.displayName.trim(), id: { not: id } } })
-    if (dup) return Response.json({ error: `模型显示名 "${body.displayName.trim()}" 已存在` }, { status: 409 })
+    if (dup) return jsonError(409, `模型显示名 "${body.displayName.trim()}" 已存在`, requestId)
     data.displayName = body.displayName.trim()
   }
   if (typeof body.targetModel === 'string' && body.targetModel.trim()) data.targetModel = body.targetModel.trim()
@@ -52,13 +54,14 @@ export async function PUT(req: Request, { params }: Params) {
   if (typeof body.enabled === 'boolean') data.enabled = body.enabled
 
   await db.modelRoute.update({ where: { id }, data })
-  return Response.json({ ok: true })
+  return jsonOk({ ok: true }, { requestId })
 }
 
 export async function DELETE(req: Request, { params }: Params) {
   const denied = await requireAdmin(req)
   if (denied) return denied
   const { id } = await params
+  const requestId = resolveRequestId(req)
   await db.modelRoute.delete({ where: { id } }).catch(() => null)
-  return Response.json({ ok: true })
+  return jsonOk({ ok: true }, { requestId })
 }
