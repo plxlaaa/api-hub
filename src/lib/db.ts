@@ -1,6 +1,7 @@
 import path from 'node:path'
 import fs from 'node:fs'
 import { PrismaClient } from '@prisma/client'
+import { createNodeSqliteClient } from '@/lib/db-driver/node-sqlite'
 import { log } from '@/lib/logger'
 
 // The DB location is a project-relative invariant: <project root>/db/custom.db.
@@ -39,17 +40,51 @@ function ensureDbDir(): void {
 
 ensureDbDir()
 
+// ---------- 驱动选择 ----------
+// Prisma：默认驱动（query engine 原生二进制，需要 glibc）
+// node-sqlite：纯绑定驱动（src/lib/db-driver/node-sqlite.ts），用于：
+//   1) Android/Termux（bionic libc 无法 dlopen Prisma 引擎，见 repo issue #1）
+//   2) 显式 DB_DRIVER=node-sqlite 的环境
+function isAndroid(): boolean {
+  if (process.platform !== 'linux') return false
+  if (fs.existsSync('/system/build.prop')) return true
+  if ((process.env.PREFIX || '').includes('com.termux')) return true
+  try {
+    const header = (process.report?.getReport?.() as { header?: { osName?: string } } | undefined)?.header
+    return header?.osName === 'android'
+  } catch {
+    return false
+  }
+}
+
+function detectDriver(): 'prisma' | 'node-sqlite' {
+  const forced = process.env.DB_DRIVER
+  if (forced === 'node-sqlite' || forced === 'prisma') return forced
+  if (isAndroid()) return 'node-sqlite'
+  return 'prisma'
+}
+
+const DB_DRIVER = detectDriver()
+
 const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined
   prismaReady: Promise<void> | undefined
 }
 
-export const db =
-  globalForPrisma.prisma ??
-  new PrismaClient({
+function createClient(): PrismaClient {
+  if (DB_DRIVER === 'node-sqlite') {
+    // 纯绑定驱动实现了 Prisma Client 的 API 子集（覆盖项目全部用到的调用形态），
+    // 类型上沿用 PrismaClient 签名让业务代码零改动。
+    log.info('使用 node-sqlite 纯绑定驱动（无 Prisma 引擎）')
+    return createNodeSqliteClient(dbFile) as unknown as PrismaClient
+  }
+  return new PrismaClient({
     datasourceUrl: databaseUrl,
     log: process.env.PRISMA_LOG === 'query' ? ['query', 'warn', 'error'] : ['warn', 'error'],
   })
+}
+
+export const db = globalForPrisma.prisma ?? createClient()
 
 /**
  * 应用 SQLite PRAGMA。
