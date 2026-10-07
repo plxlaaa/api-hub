@@ -1,5 +1,8 @@
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
+  // 不声明时 Prisma 在 arm64 上默认拉 x86_64 引擎（dlopen 报 EM_X86_64 instead of EM_AARCH64），
+  // 显式补齐常见服务器目标：本机架构 + Linux arm64（树莓派/ARM VPS/容器交叉场景）
+  binaryTargets = ["native", "linux-arm64-openssl-3.0.x"]
 }
 
 datasource db {

@@ -41,6 +41,32 @@ if (node.ok) {
   check(`Node.js 版本 >= 20（当前 ${node.out.trim()}）`, major >= 20 ? 'pass' : 'fail', '升级到 Node 20+（推荐 22 LTS）')
 }
 
+// 1.1 CPU 架构（项目支持 x64 / arm64，其他架构无法运行原生依赖）
+check(`CPU 架构 ${process.arch}（支持 x64/arm64）`,
+  (process.arch === 'x64' || process.arch === 'arm64') ? 'pass' : 'fail',
+  `当前架构 ${process.arch} 无预编译依赖；请更换 x64/arm64 设备`)
+
+// 1.2 Android / Termux 检测
+// Prisma 6 的 query engine 是 glibc 原生二进制，与 Android bionic libc 不兼容（dlopen 报
+// libpthread.so.0 not found）。Android 上改走 Node 22+ 内置的 node:sqlite 驱动（零原生依赖）。
+const isAndroid = process.platform === 'linux' && (
+  existsSync('/system/build.prop')
+  || (process.env.PREFIX || '').includes('com.termux')
+  || (() => { try { return process.report?.getReport?.().header?.osName === 'android' } catch { return false } })()
+)
+let hasNodeSqlite = false
+if (isAndroid) {
+  try {
+    const r = spawnSync('node', ['-e', "require('node:sqlite');console.log('ok')"], { encoding: 'utf8' })
+    hasNodeSqlite = r.status === 0
+  } catch { /* ignore */ }
+  check('Android/Termux 环境',
+    hasNodeSqlite ? 'warn' : 'fail',
+    hasNodeSqlite
+      ? '检测到 Termux：Prisma 引擎不可用，启动时自动切换 node:sqlite 内置驱动（无需额外安装）'
+      : '检测到 Termux 且 Node 无内置 node:sqlite（需 Node 22.5+）：请先升级 Node（pkg install nodejs）')
+}
+
 // 2. bun（可选但推荐）
 const bun = cmd('bun', ['-v'])
 check('bun 已安装（推荐，可选）', bun.ok ? 'pass' : 'warn', 'npm install -g bun；或全程用 npm 等价命令')
