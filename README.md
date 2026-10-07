@@ -14,10 +14,11 @@
 | 📊 运营数据 | 渠道横评（调用量/成功率/延迟/Token）、24h 探测可用率、密钥级用量统计、仪表盘 Top5 + 7d 趋势 |
 | 🔑 统一调用 | 客户端始终用 OpenAI 格式访问网关；密钥配额限制；流式 SSE 全支持 |
 | 🔐 管理安全 | 首次自设用户名+密码（scrypt 加盐哈希，明文不落盘）；一次性设置令牌防抢注；登录 5 次错锁 10 分钟；HttpOnly 会话 Cookie 防 XSS 窃取 |
-| 🛡️ 后端加固 | 客户端断开即中止上游请求（不白烧额度）；上游错误体密钥自动脱敏；渠道地址默认禁内网（防 SSRF）；统一 Key 限速 + 配额原子扣减；SQLite WAL + 忙等超时；熔断冷却期防抖动 |
+| 🛡️ 后端加固 | 客户端断开即中止上游请求（不白烧额度）；上游错误体密钥自动脱敏；渠道地址默认禁内网（防 SSRF，字面量 + DNS 解析双重判定）；统一 Key 限速 + 配额原子扣减；SQLite WAL + 忙等超时；熔断冷却期防抖动 |
 | 🔭 可观测 | 结构化 JSON 日志（级别过滤 + 字段自动脱敏 + 请求 ID 全链路透传）；`/api/health` 健康检查（真探测数据库可读写，异常返回 503）；日志接口游标分页，深翻页不再全表扫 |
-| 🌐 配套 | 公开模型广场（脱敏状态页）、明暗双主题、配置备份导出/导入 |
-| 📦 部署 | Linux 脚本 / Windows 脚本 / Docker Compose 三种装法；`node doctor.mjs` 环境自检 |
+| 🌐 配套 | 公开模型广场（脱敏状态页）、明暗双主题、配置备份导出/导入（`percent`/`activeHours`/`metadata` 无损往返） |
+| 📦 部署 | Linux 脚本 / Windows 脚本 / Docker Compose / 免依赖 tarball 四种装法；`node doctor.mjs` 环境自检 |
+| 🧰 部署物料 | 仓库自带 `deploy/`：systemd unit、nginx 反代（含HTTP/2 版本适配）、logrotate、环境变量样例、Windows 服务注册/卸载脚本 |
 
 ## 界面预览
 
@@ -159,6 +160,43 @@ docker compose logs -f         # 看首次设置令牌
 | 备份数据库 | `docker run --rm -v api-hub-data:/data -v $PWD:/backup alpine tar czf /backup/db-$(date +%F).tgz -C /data .` |
 
 也可以在 Linux 脚本里直接加 `--docker` 走同一套流程。
+
+### 方式四：免依赖 tarball（只要 Node 20+）
+
+生产机不想装 Node 依赖栈时，在有开发环境的机器上打包带走：
+
+```bash
+npm run build
+bash scripts/pack-standalone.sh     # 产物：api-hub-standalone.tar.gz
+```
+
+目标机器上解压即可运行（脚本已自动剔除 `db/`，不会把你的 API Key 打进包）：
+
+```bash
+sudo mkdir -p /opt/api-hub && sudo tar xzf api-hub-standalone.tar.gz -C /opt/api-hub
+sudo cp /opt/api-hub/deploy/systemd/api-hub.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now api-hub
+```
+
+> tarball 不含 Prisma CLI，**无法执行 schema迁移**。本项目启动时自动建表（幂等），
+> 涉及字段变更时建议用源码部署，或先在旧机器迁移再把 `db/` 一起带走。
+
+### 想自己接管 systemd / nginx / Windows 服务？
+
+仓库的 `deploy/` 目录带了现成物料，全部经过真实工具校验
+（`systemd-analyze verify`、`nginx -t`、`logrotate -d`、PowerShell Parser）：
+
+| 路径 | 用途 |
+|------|------|
+| `deploy/systemd/api-hub.service` | systemd 服务单元（含 `EnvironmentFile` 集中配置） |
+| `deploy/nginx/api-hub.conf` | 反向代理 + 限流 |
+| `deploy/nginx/api-hub-http2.conf` | HTTP/2 片段（nginx ≥1.25 与 <1.25 两种写法） |
+| `deploy/logrotate/api-hub` | 文件式日志轮转（journald 之外用） |
+| `deploy/env/api-hub.env.example` | 端口/时区/日志级别配置样例 |
+| `deploy/windows/register-service.ps1` | Windows 服务注册（含崩溃重启、日志轮转） |
+| `deploy/windows/unregister-service.ps1` | 卸载（默认先备份 `db/`） |
+
+完整的**防火墙**、**升级与卸载**、**FAQ** 见 [INSTALL.md](INSTALL.md)。
 
 ## 手动开始
 

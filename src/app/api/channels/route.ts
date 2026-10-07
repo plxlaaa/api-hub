@@ -4,7 +4,7 @@ import { normalizeBaseUrl } from '@/lib/probe'
 import { parseApiFormat } from '@/lib/adapters'
 import { parseMetadata } from '@/lib/metadata'
 import { parseStringArray } from '@/lib/json-field'
-import { checkUpstreamUrl, allowsInternalUrl } from '@/lib/url-safety'
+import { checkUpstreamUrlWithDns, allowsInternalUrl } from '@/lib/url-safety'
 import { resolveRequestId, jsonOk, jsonBadRequest } from '@/lib/api-response'
 import { Validator, validationResponse } from '@/lib/validate'
 import { log } from '@/lib/logger'
@@ -12,17 +12,26 @@ import { log } from '@/lib/logger'
 export const dynamic = 'force-dynamic'
 
 export async function GET(req: Request) {
+  const requestId = resolveRequestId(req)
   const denied = await requireAdmin(req)
   if (denied) return denied
   const channels = await db.channel.findMany({
     orderBy: { createdAt: 'asc' },
     select: { apiKey: false, id: true, name: true, baseUrl: true, apiFormat: true, models: true, enabled: true, autoDisabled: true, failStreak: true, autoDisabledAt: true, status: true, latencyMs: true, lastCheckAt: true, lastError: true, remark: true, metadata: true, createdAt: true },
   })
-  // 渠道横评统计：按渠道名聚合全量调用日志（调用量/成功率/平均转发延迟/Token 消耗）
+  // 渠道横评统计：按渠道名聚合调用日志（调用量/成功率/平均转发延迟/Token 消耗）
+  //
+  // 性能：原来不带时间窗，对全量调用日志做 groupBy。日志表上限 2000 行、且仪表盘
+  // 每 8 秒轮询一次，等于每8 秒全表扫一遍。改为默认只统计近 30 天：
+  // 横评看的是近期趋势，30 天前的历史对「哪个渠道更好用」这个判断没有参考价值。
+  // 需要全量累计时可显式传 ?all=1。
+  const url = new URL(req.url)
+  const statsWindowStart = url.searchParams.get('all') === '1' ? undefined : new Date(Date.now() - 30 * 24 * 3600_000)
   const grouped = await db.requestLog.groupBy({
     by: ['channelName', 'ok'],
     _count: { _all: true },
     _sum: { totalTokens: true, latencyMs: true },
+    ...(statsWindowStart ? { where: { createdAt: { gte: statsWindowStart } } } : {}),
   })
   type Acc = { calls: number; ok: number; tokens: number; latSum: number; latN: number }
   const stats = new Map<string, Acc>()
@@ -50,7 +59,7 @@ export async function GET(req: Request) {
     if (p.ok) u.ok += p._count._all
     uptime.set(p.channelId, u)
   }
-  return Response.json(
+  return jsonOk(
     channels.map((c) => {
       const s = stats.get(c.name)
       const u = uptime.get(c.id)
@@ -64,7 +73,8 @@ export async function GET(req: Request) {
           : { calls: 0, ok: 0, tokens: 0, avgLatencyMs: null },
         uptime24h: u && u.total > 0 ? Math.round((u.ok / u.total) * 100) : null,
       }
-    })
+    }),
+    { requestId }
   )
 }
 
@@ -88,7 +98,7 @@ export async function POST(req: Request) {
   if (v.failed()) return validationResponse(v)
 
   // SSRF 校验：baseUrl 会被服务端主动 fetch，内网/元数据地址默认拒绝
-  const checkedUrl = checkUpstreamUrl(baseUrl, allowsInternalUrl(metadata) || allowsInternalUrl(remark))
+  const checkedUrl = await checkUpstreamUrlWithDns(baseUrl, allowsInternalUrl(metadata) || allowsInternalUrl(remark))
   if (!checkedUrl.ok) return jsonBadRequest(checkedUrl.reason, requestId)
 
   const m = parseMetadata(metadata)

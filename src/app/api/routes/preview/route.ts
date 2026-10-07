@@ -1,7 +1,7 @@
 import { db } from '@/lib/db'
 import { requireAdmin } from '@/lib/auth'
 import { normalizeStrategy, orderCandidates, type Candidate } from '@/lib/route-order'
-import { resolveRequestId, jsonBadRequest } from '@/lib/api-response'
+import { resolveRequestId, jsonBadRequest, jsonOk } from '@/lib/api-response'
 
 export const dynamic = 'force-dynamic'
 
@@ -30,7 +30,7 @@ export async function POST(req: Request) {
     .map((c) => ({ id: c.id, name: c.name, reason: c.autoDisabled ? '熔断中' : '已停用' }))
 
   const { ordered, basis } = await orderCandidates(candidates, strategy)
-  return Response.json({
+  return jsonOk({
     ordered: ordered.map((x) => ({
       id: x.ch.id,
       name: x.ch.name,
@@ -40,5 +40,5 @@ export async function POST(req: Request) {
       basis: basis.get(x.ch.id) || '',
     })),
     unavailable,
-  }, { headers: { 'X-Request-Id': requestId } })
+  }, { requestId })
 }

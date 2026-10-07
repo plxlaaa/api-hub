@@ -1,6 +1,7 @@
 import { db } from '@/lib/db'
 import { requireAdmin } from '@/lib/auth'
-import { parseApiFormat, isApiFormat } from '@/lib/adapters'
+import { parseApiFormat } from '@/lib/adapters'
+import { resolveRequestId, jsonOk } from '@/lib/api-response'
 
 export const dynamic = 'force-dynamic'
 
@@ -9,6 +10,7 @@ export const dynamic = 'force-dynamic'
  * 渠道状态统计 + 今日/累计调用 + 密钥配额 + 各路由配置
  */
 export async function GET(req: Request) {
+  const requestId = resolveRequestId(req)
   const denied = await requireAdmin(req)
   if (denied) return denied
 
@@ -55,7 +57,7 @@ export async function GET(req: Request) {
     }
   }
 
-  return Response.json({
+  return jsonOk({
     channels: channels.map((c) => ({ ...c, apiFormat: parseApiFormat(c.apiFormat) })),
     routes,
     tokens,
@@ -67,5 +69,5 @@ export async function GET(req: Request) {
       channelsDown: channels.filter((c) => c.enabled && (c.status === 'offline' || c.autoDisabled)).length,
     },
     generatedAt: new Date().toISOString(),
-  })
+  }, { requestId })
 }

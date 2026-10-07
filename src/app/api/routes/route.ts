@@ -16,6 +16,7 @@ function normalizePrice(v: unknown): number | null | undefined {
 }
 
 export async function GET(req: Request) {
+  const requestId = resolveRequestId(req)
   const denied = await requireAdmin(req)
   if (denied) return denied
   const routes = await db.modelRoute.findMany({ orderBy: { createdAt: 'asc' } })
@@ -39,7 +40,7 @@ export async function GET(req: Request) {
     if (g._max.createdAt && (!s.lastUsedAt || g._max.createdAt > s.lastUsedAt)) s.lastUsedAt = g._max.createdAt
     stats.set(g.model, s)
   }
-  return Response.json(
+  return jsonOk(
     routes.map((r) => {
       const s = stats.get(r.displayName) || { total: 0, ok: 0, tokens: 0, lastUsedAt: null as Date | null }
       return {
@@ -56,7 +57,8 @@ export async function GET(req: Request) {
         createdAt: r.createdAt,
         stats: { total: s.total, ok: s.ok, tokens: s.tokens, lastUsedAt: s.lastUsedAt },
       }
-    })
+    }),
+    { requestId }
   )
 }
 

@@ -263,9 +263,157 @@ curl "http://hub:3000/api/request-logs?limit=50&cursor=<nextCursor>"
 | `GET` | `/api/overview` | 一站式汇总（CLI / 仪表盘） |
 | `GET` `PUT` | `/api/settings` | 熔断设置（`circuitBreaker`、`cbThreshold`） |
 | `GET` | `/api/config/export` | 导出全部配置 |
-| `POST` | `/api/config/import` | 导入配置 |
+| `POST` | `/api/config/import` | 导入配置（`merge` / `replace`，见下） |
 | `GET` | `/api/public/square` | 模型广场公开数据。**公开**，已脱敏 |
 | `POST` | `/api/test-chat` | 一键对话测试（管理员，不消耗配额） |
+
+---
+
+## 配置导入导出
+
+### `GET /api/config/export`
+
+导出全部配置，落盘文件名由 `Content-Disposition` 给出。
+
+导出结构（节选）：
+
+```jsonc
+{
+  "channels": [
+    {
+      "name": "官方",
+      "baseUrl": "https://api.openai.com/v1",
+      "apiKey": "sk-***",          // 已脱敏
+      "apiFormat": "openai",
+      "models": ["gpt-4o", "gpt-4o-mini"],
+      "percent": 100,              // 流量占比 0-100
+      "activeHours": "09:00-18:00",  // 活跃时段；空串表示不限
+      "enabled": true,
+      "remark": "",
+      "metadata": { "allowInternal": true }
+    }
+  ],
+  "routes": [
+    {
+      "displayName": "gpt-4o",
+      "targetModel": "gpt-4o",
+      "strategy": "weighted",      // 见路由策略表
+      "priceIn": 0, "priceOut": 0,
+      "enabled": true,
+      "metadata": {},
+      "channelConfigs": [
+        { "name": "官方", "weight": 70, "percent": 100 },
+        { "name": "备用", "weight": 30, "percent": 100, "activeHours": "00:00-08:00" }
+      ]
+    }
+  ]
+}
+```
+
+> **保真保证**：导出包含 `percent` / `activeHours` / `metadata`，导入时全部还原，
+> 因此「导出 → 改→ 导入」是无损往返。路由里的渠道以**名字**引用，
+> 导入时按名字反查 ID。
+>
+> 渠道引用的来源按优先级回退，三种写法都支持：
+> `channelConfigs`（本项目导出格式，含权重明细）→ `channels`（早期导出与手写配置）
+> → `channelIds`（老格式纯 id 数组）。
+
+### `POST /api/config/import`
+
+请求体支持两种形状（均接受）：
+
+```jsonc
+// 形状 A：裸配置体
+{ "channels": [...], "routes": [...] }
+
+// 形状 B：显式模式
+{ "mode": "merge", "data": { "channels": [...], "routes": [...] } }
+```
+
+路由里的渠道引用（三种写法任选其一，按 `channelConfigs` → `channels` → `channelIds` 回退）：
+
+```jsonc
+"routes": [
+  {
+    "displayName": "gpt-4o",
+    "targetModel": "gpt-4o",
+    "strategy": "weighted",
+    "channelConfigs": [                      // ① 完整写法：带权重/时段
+      { "name": "官方", "weight": 70 },
+      { "name": "备用", "weight": 30, "activeHours": "00:00-08:00" }
+    ]
+  },
+  {
+    "displayName": "claude-3",
+    "channels": [ { "name": "官方" } ]       // ② 按渠道名引用
+  },
+  {
+    "displayName": "legacy",
+    "channelIds": [ "cmuxf7juj0001pkcrb2fo8fy6" ]   // ③ 老格式：直接给 id
+  }
+]
+```
+
+| `mode` | 行为 |
+|--------|------|
+| `merge`（默认） | 追加并按**渠道名去重**，同名以已存在者为准 |
+| `replace` | 先清空渠道与路由表，再全量插入 |
+
+>非法 `mode` 值会退化为 `merge`（而非 `replace`）——不做猜测，避免误删线上配置。
+
+成功响应（`200`）：
+
+```jsonc
+{
+  "ok": true,
+  "channelsAdded": 2, "channelsSkipped": 0,
+  "routesAdded": 3,   "routesSkipped": 0,
+  "channelsMissingKey": 1,
+  "importedChannels": 2, "importedRoutes": 3,   // 渠道页 / CLI 使用的简写字段
+  "refsDropped": 2,
+  "warnings": ["路由「x」引用了不存在的渠道：a，已剔除该引用"]
+}
+```
+
+校验失败返回 `400`：`{ ok: false, error: "..." }`。
+
+导入过程中的保护规则：
+
+- **规模上限**：最多 500 个渠道、1000 条路由；同文件内重复项只保留首个。
+- **悬空引用绝不写入**：路由引用了不存在的渠道时，该引用被剔除并计入 `refsDropped`；
+  全部引用失效的路由整条跳过（计入 `routesSkipped`）。
+- **SSRF 校验**：`baseUrl` 经 `checkUpstreamUrlWithDns` 判定，内网地址默认跳过并告警。
+  确需内网上游时在该渠道 `metadata.allowInternal` 置 `true`。
+- **策略白名单**：`strategy` 只接受受支持的取值，非法值回退为默认策略。
+- **时段校验**：`activeHours` 需形如 `09:00-18:00`（`HH:MM-HH:MM`），非法值忽略；
+  跨午夜窗口如 `22:00-06:00` 视为环绕。空串 / 缺失表示全天可用。
+
+---
+
+## 附录：安全与统计口径
+
+### 上游地址校验（SSRF）
+
+`src/lib/url-safety.ts` 提供两级判定：
+
+1. **字面量校验**：主机名直接是 `127.0.0.1`、`10.x`、`192.168.x`、`169.254.169.254`、
+   `::1`、`fe80::`、`fc00::` 等一律拒绝；
+2. **DNS 解析后校验**（`checkUpstreamUrlWithDns`）：解析域名，若任一 A/AAAA 记录落在
+   受阻网段则拒绝——用于堵住「域名解析到内网」的绕过。IPv4-mapped IPv6
+   （`::ffff:127.0.0.1`）会先剥前缀再按 IPv4 判定。
+
+已接入三处入口：渠道保存/更新、配置导入、`channels/fetch-models`。
+`allowInternal` 为真或 DNS 解析失败时放行。
+
+### 统计口径
+
+- **延迟均值只计成功请求**：`/api/stats` 与 `/api/channels` 口径一致，
+  仅 `ok === true` 且延迟为有限数值的样本参与均值计算。
+  （网关超时上限 300 秒，若把失败请求计入均值，一次超时就足以让数字失真。）
+- **时间窗**：按 `TZ` 环境变量对应的时区切分自然日；渠道横评默认统计最近 30 天，
+  `?all=1` 取全量。
+- `/api/stats` 的数据库查询固定为 2 次（1 次 groupBy 求总量 + 1 次 findMany 取 7 天窗口明细），
+  逐渠道/逐模型维度在内存中聚合。
 
 ---
 

@@ -1,7 +1,7 @@
 import { db } from '@/lib/db'
 import { isApiFormat } from '@/lib/adapters'
 import { requireAdmin } from '@/lib/auth'
-import { checkUpstreamUrl, allowsInternalUrl } from '@/lib/url-safety'
+import { checkUpstreamUrlWithDns, allowsInternalUrl } from '@/lib/url-safety'
 import { resolveRequestId, jsonOk, jsonError, jsonBadRequest } from '@/lib/api-response'
 import { Validator, validationResponse } from '@/lib/validate'
 import { log } from '@/lib/logger'
@@ -42,7 +42,7 @@ export async function PUT(req: Request, { params }: Params) {
     // SSRF 校验：allowInternal 取「本次提交或已存」的 metadata，避免误伤内网自建渠道
     const allowInternal =
       allowsInternalUrl(body.metadata) || allowsInternalUrl(body.remark) || allowsInternalUrl(ch.metadata)
-    const checked = checkUpstreamUrl(baseUrl, allowInternal)
+    const checked = await checkUpstreamUrlWithDns(baseUrl, allowInternal)
     if (!checked.ok) return jsonBadRequest(checked.reason, requestId)
     data.baseUrl = checked.url
   }

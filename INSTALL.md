@@ -8,9 +8,22 @@
 | Windows 10/11 | PowerShell 脚本 | [方式二](#方式二windows-脚本安装) |
 | 不想装 Node / 无root / 容器环境 | Docker | [方式三](#方式三docker-部署) |
 | 想手动接管进程 | 手动部署 | [方式四](#方式四手动部署systemd--nssm) |
+| 只想要二进制产物，不想装依赖 | Release tarball | [方式五](#方式五release-tarball-免依赖部署) |
 
 > **需要 GitHub PAT**：仓库为私有，拉源码需令牌（勾选 `repo` 即可）。
 > 令牌只用于下载源码，脚本不会上传任何数据。别把它写进脚本或提交进仓库。
+
+### 仓库自带的部署物料
+
+| 文件 | 用途 |
+|------|------|
+| `deploy/systemd/api-hub.service` | systemd 单元（含安全加固、优雅停机、重启节流） |
+| `deploy/nginx/api-hub.conf` | nginx 反代样例（SSE 关缓冲、登录限流、健康检查内网限制） |
+| `deploy/nginx/api-hub-http2.conf` | HTTP/2 片段（按 nginx 版本二选一，见文件内说明） |
+| `deploy/env/api-hub.env.example` | 集中管理端口/时区/日志级别的环境变量样例 |
+| `deploy/logrotate/api-hub` | 日志文件轮转（不走 journald 时才需要） |
+| `deploy/windows/register-service.ps1` | 手动把已装好的目录注册为 Windows 服务 |
+| `deploy/windows/unregister-service.ps1` | 卸载 Windows 服务（默认保留数据） |
 
 ---
 
@@ -70,6 +83,35 @@ sudo systemctl status api-hub
 journalctl -u api-hub -f          # 跟踪日志
 ```
 
+### 集中管理配置项（改端口不用改 unit）
+
+把易变项挪到 env 文件，之后改端口/时区/日志级别只需编辑该文件并重启：
+
+```bash
+sudo cp deploy/env/api-hub.env.example /etc/api-hub/api-hub.env
+sudo chown api-hub:api-hub /etc/api-hub/api-hub.env
+sudo chmod 600 /etc/api-hub/api-hub.env
+# 编辑内容后，编辑 systemd 单元取消注释这一行：
+#   EnvironmentFile=/etc/api-hub/api-hub.env
+sudo systemctl daemon-reload && sudo systemctl restart api-hub
+```
+
+> env 文件会被 systemd 明文读取，**不要往里写任何密钥**。上游 Key 存在 SQLite，
+> 网关统一 Key 在管理台创建，都不需要写进环境变量。
+
+### 日志轮转
+
+用 systemd 时日志进 journald，**轮转由 journald 自带能力负责**（`/etc/systemd/journald.conf`），
+无需额外配置。只有在下面这些情况下才需要 `deploy/logrotate/api-hub`：
+
+- 用 nohup 降级模式且把日志重定向到 `/var/log/api-hub/*.log`
+- 容器部署时把日志目录 bind mount 到宿主机
+
+```bash
+sudo cp deploy/logrotate/api-hub /etc/logrotate.d/api-hub
+sudo logrotate -d /etc/logrotate.d/api-hub   # 先干跑校验，不实际执行
+```
+
 ---
 
 ## 方式二：Windows 脚本安装
@@ -112,12 +154,51 @@ Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -ExecutionPolicy 
 | 卸载服务 | `nssm stop api-hub; nssm remove api-hub confirm` |
 | 实时日志 | 日志文件见下|
 
-日志路径：`%ProgramData%\api-hub\logs\api-hub.err.log`（NSSM 捕获 stdout/stderr）。
+日志路径：`%ProgramData%\api-hub\logs\api-hub.err.log`（NSSM 捕获 stdout/stderr，
+已配置 10MB 自动轮转）。
 
 > **服务注意事项**
 > - 服务以 `LocalSystem` 运行时，**无盘符映射**（如 `Z:\`）不可用，路径一律写绝对路径。
 > - 若要用网络路径上的数据目录，请改用 `-ServiceUser域\账号` 并授予该账号权限。
 > - 卸载脚本请走 `nssm remove`，直接删文件夹会留下服务注册项。
+
+### 手动注册服务（换机器 / 重装系统后）
+
+已装好但服务丢了（比如重装系统、重置服务注册表），不必重跑安装脚本：
+
+```powershell
+# 需已安装 NSSM：winget install nssm.nssm
+.\deploy\windows\register-service.ps1 -Dir 'C:\api-hub' -Port 3000
+```
+
+脚本会自动探测 `node.exe` 路径、写入开机自启、配置崩溃重启与日志轮转，
+然后轮询 `/api/health` 确认真的起来了（最多等 30 秒）。
+
+> ⚠️ `node.exe` 必须用**绝对路径**：服务环境不继承你的用户 PATH，
+> 用相对路径或 PATH 里的名字会启动失败。
+
+卸载服务（默认会先把 `db/` 打包备份到桌面）：
+
+```powershell
+.\deploy\windows\unregister-service.ps1              # 保留数据目录
+.\deploy\windows\unregister-service.ps1 -Purge       # 连目录一起删（不可恢复）
+```
+
+### 包管理器分发
+
+NSSM 与 Node.js 都可以走包管理器，省去手动下载：
+
+```powershell
+winget install OpenJS.NodeJS.LTS      # 或 winget install Oven-sh.Bun
+winget install nssm.nssm
+
+# 其他可选
+choco install nodejs nssm
+scoop install nodejs nssm
+```
+
+> API Hub 本身是私有仓库，**没有 winget/choco/scoop 的官方包**。
+> 这些工具只用来装依赖（Node / bun / NSSM），安装仍走上面的脚本或手动步骤。
 
 ### WSL2 部署
 
@@ -185,9 +266,23 @@ docker run -d \
 仓库自带 `Caddyfile`（自动 HTTPS）。用 nginx 参考 `deploy/nginx/api-hub.conf`：
 
 ```bash
+sudo mkdir -p /etc/nginx/snippets
 sudo cp deploy/nginx/api-hub.conf /etc/nginx/conf.d/api-hub.conf
+
+# HTTP/2 片段必须按 nginx 版本二选一，否则 nginx -t 会失败：
+#   nginx >= 1.25 → 用 `http2 on;`
+#   nginx <  1.25 → 片段留空，并把 conf 里 443 那行改成 listen 443 ssl http2;
+nginx -v        # 先确认版本
+sudo cp deploy/nginx/api-hub-http2.conf /etc/nginx/snippets/
+
+# 证书路径换成你自己的（仓库默认 hub.example.com）
+sudo sed -i 's/hub.example.com/hub.你的域名.com/g' /etc/nginx/conf.d/api-hub.conf
+
 sudo nginx -t && sudo systemctl reload nginx
 ```
+
+> HTTP/2 的写法在 nginx 1.25 发生过不兼容变更，两种写法互斥。
+> 详细说明与切换方法见 `deploy/nginx/api-hub-http2.conf` 文件内注释。
 
 ---
 
@@ -227,6 +322,79 @@ nssm set api-hub AppEnvironmentExtra "PORT=3000" "HOSTNAME=127.0.0.1" "NODE_ENV=
 nssm set api-hub Start SERVICE_AUTO_START
 nssm start api-hub
 ```
+
+> 更省事：直接用 `deploy\windows\register-service.ps1`，它会自动补齐崩溃重启、
+> 日志轮转、健康检查验证。参数见脚本内`-? ` 或文件头注释。
+
+---
+
+## 方式五：Release tarball（免依赖部署）
+
+不想在生产机上装 Node / bun，也不想用 Docker 时：把构建产物直接打包带走。
+`.next/standalone` 已经是自包含产物（依赖已打进 `_next`），只需额外带上静态资源。
+
+### 打包（在有开发环境的机器上执行）
+
+```bash
+# 1. 正常构建
+bun install && npx prisma generate && npm run build
+
+# 2. 一键打包（推荐）
+bash scripts/pack-standalone.sh
+# 产物：./api-hub-standalone.tar.gz
+```
+
+脚本做了三件手工容易出错的事：
+
+- **规避 `tar -C` 陷阱**：`tar` 的多个 `-C` 是**相对上一个 `-C` 之后的目录**解析的，
+  所以 `-C .next/standalone . -C .next/static .next/static` 会去找
+  `.next/standalone/.next/static` 并报 `Cannot stat`。脚本改用暂存目录逐项拷贝。
+- **剔除凭据与数据库**：`.next/standalone/db/` 里含 `credentials.env`、`custom.db`、
+  `custom.db-wal`——这些是开发机的管理员凭据和上游 API Key，直接打包等于公开发布。
+  脚本在打包前 `rm -rf db` 并做二次校验，命中即中止。
+- **补齐部署物料**：带上 `prisma/`、`deploy/`（systemd、nginx、Windows 脚本）、
+  `.env.example`、`INSTALL.md`，解压即可直接注册服务。
+
+> `package.json` 的 `build` 脚本已把 `static` 与 `public` 复制进 `standalone/`，
+> 脚本仍会显式补一遍，防止脚本变更导致漏文件。
+>
+> 想手动打包时，**务必用绝对路径**并排除 `db`：
+> ```bash> STAGE=$(mktemp -d)
+> cp -a .next/standalone/. "$STAGE/" && rm -rf "$STAGE/db"
+> mkdir -p "$STAGE/.next"
+> cp -a .next/static "$STAGE/.next/static"
+> cp -a public prisma deploy "$STAGE/"
+> tar czf api-hub-standalone.tar.gz -C "$STAGE" .
+> rm -rf "$STAGE"
+> ```
+
+### 部署（目标机器只需 Node 20+）
+
+```bash
+T=ghp_你的GitHub令牌
+curl -fsSL -H "Authorization: Bearer $T" \
+  -o api-hub-standalone.tar.gz \
+  https://github.com/plxlaaa/api-hub/releases/latest/download/api-hub-standalone.tar.gz
+
+sudo mkdir -p /opt/api-hub && sudo tar xzf api-hub-standalone.tar.gz -C /opt/api-hub
+sudo chown -R api-hub:api-hub /opt/api-hub
+
+# 注册为 systemd 服务
+sudo cp /opt/api-hub/deploy/systemd/api-hub.service /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now api-hub
+```
+
+### 与源码部署的差异
+
+| 项目 | 源码部署 | tarball 部署 |
+|------|---------|-------------|
+| 机器依赖 | Node + bun + Prisma CLI | **仅 Node** |
+| 升级方式 | `git pull` + 重新构建 | 重新下载 tarball 覆盖 |
+| 回滚 | `git checkout` 切标签 | 备份旧目录后重新解压 |
+| `npx prisma db push` | 可用 | 不可用（无 CLI），依赖启动时自动建表 |
+
+> ⚠️ tarball 部署**不能执行 schema 迁移**。本项目启动时会自动建表（幂等），
+> 新增字段时若涉及迁移，请改用源码部署或在旧机器上迁移后再把 `db/` 一起带走。
 
 ---
 
@@ -346,12 +514,27 @@ A：多半是 Node 路径不对。`nssm get api-hub Application` 核对，
 A：`bash install-api-hub.sh --update --token "$T"`（会自动备份 db 并迁移），
 升级前后的差异见 [CHANGELOG.md](CHANGELOG.md)。
 
+**Q：导入配置后路由数量不对 / 提示「引用的渠道不存在」**
+A：导入按**渠道名**反查 ID。导出的 JSON 里若某条路由引用的渠道在同一次导入中不存在
+（比如只导入了路由没导入渠道），该引用会被**自动剔除**并在响应的 `warnings` 里列出，
+不会写入悬空 ID。若确实需要，请把渠道与路由放在同一份配置文件里导入。
+
+**Q：导入时提示「已跳过 N 个内网地址」**
+A：出于 SSRF 防护，`127.0.0.1` / `10.x` / `192.168.x` / `169.254.169.254` 等内网地址
+默认被拒绝（`checkUpstreamUrlWithDns` 会先做 DNS 解析再判定，含 `::ffff:` 映射的 IPv6）。
+如果你的上游**确实是内网**（如内网自建网关），在该渠道备注里加 `allowInternal: true`，
+或导入时使用 `mode: "merge"` 并在配置中带上该备注字段。
+
+**Q：统计页的延迟均值和渠道页对不上**
+A：现在两处口径已统一——**失败请求不计入延迟均值**（网关超时上限 300 秒，
+一次超时就足以把均值拉飞）。此前 `/api/stats` 会把失败请求也算进去，已修正。
+
 ### 日志排查
 
 ```bash
 journalctl -u api-hub -f                      # Linux 实时
 journalctl -u api-hub --since "1h ago" -p err # 最近一小时错误
-docker compose logs -f api-hub# Docker 实时
+docker compose logs -f api-hub                # Docker 实时
 ```
 
 日志为结构化 JSON，每条含 `ts` / `level` / `msg`。
@@ -360,4 +543,109 @@ docker compose logs -f api-hub# Docker 实时
 
 ```bash
 grep 'a1b2c3d4' api-hub.log
+# 或按请求 ID 查 systemd 日志
+journalctl -u api-hub --since "1h ago" | grep -F 'a1b2c3d4'
+```
+
+Windows 侧日志在 `logs/api-hub.err.log` / `logs/api-hub.out.log`
+（由NSSM 的 `AppRotateBytes 10485760` 自动按 10MB 轮转）。
+
+---
+
+## 防火墙与端口暴露
+
+**默认只应监听 `127.0.0.1`**，由 nginx 反代对外。非要直接暴露 3000 端口时再开放。
+
+| 系统 | 仅本机 | 对外开放 | 彻底移除 |
+|------|--------|---------|---------|
+| firewalld | `firewall-cmd --permanent --add-port=3000/tcp` | `--add-port` 后 `--reload` | `--remove-port=3000/tcp && --reload` |
+| ufw | `sudo ufw allow 3000/tcp` | 同左 | `sudo ufw delete allow 3000/tcp` |
+| iptables | `iptables -I INPUT 1 -p tcp --dport 3000 -j ACCEPT` | — | `iptables -D INPUT -p tcp --dport 3000 -j ACCEPT` |
+| Windows | — | `New-NetFirewallRule -DisplayName "api-hub" -Direction Inbound -LocalPort 3000 -Protocol TCP -Action Allow` | `Remove-NetFirewallRule -DisplayName "api-hub"` |
+| Windows（脚本已装） | — | `.\install-api-hub.ps1 -OpenFirewall` | `.\uninstall-api-hub.ps1 -CloseFirewall` |
+
+> 走反代时通常**不需要**放行 3000：只放行 443（或 80），
+> nginx 与 api-hub 在同一台机器上走回环，不经过防火墙 INPUT 链的外部路径。
+
+验证放行是否生效：
+
+```bash
+ss -lntp | grep 3000        # 确认监听地址（应为 127.0.0.1 或 0.0.0.0）
+curl -fsS https://你的域名/api/health
+```
+
+---
+
+## 升级与卸载
+
+### 升级
+
+| 安装方式 | 升级命令 |说明 |
+|---------|---------|------|
+| Linux 脚本 | `bash install-api-hub.sh --update --token "$T"` | 自动备份 db → 拉新代码 →装依赖 → 构建 → 重启 |
+| 源码部署 | `git pull && bun install && npx prisma generate && npm run build && sudo systemctl restart api-hub` | 手动备份 db |
+| Docker | `git pull && docker compose up -d --build` | **先备份 volume**，见方式三 |
+| Windows 脚本 | `.\install-api-hub.ps1 -Update -Token $T` | 停服 → 备份 → 覆盖 → 重启 |
+| tarball | 重新下载新 tarball 覆盖 `/opt/api-hub` | 保留 `db/` 目录即保留数据 |
+
+所有方式升级前都应先备份（脚本会自动做，手动部署请务必执行）：
+
+```bash
+sqlite3 db/custom.db ".backup '/backup/custom-$(date +%F).db'"
+```
+
+升级后必查：
+
+```bash
+curl -fsS http://127.0.0.1:3000/api/health   # 期望 status=ok, db.ok=true
+journalctl -u api-hub -n 50 --no-pager        # 有无自动建表失败 / 迁移报错
+```
+
+回滚：源码与 tarball 部署可`git checkout <上一个标签>` 或还原备份目录后重启；
+Docker 需把镜像标签固定回旧版本再 `up -d`。
+
+### 卸载
+
+**Linux（脚本安装）**
+
+```bash
+bash install-api-hub.sh --uninstall --token "$T"   # 停服 + 移除 systemd unit
+sudo rm -rf /opt/api-hub# 谨慎：会连同 db/ 一起删除
+```
+
+> 想保留数据先备份 `db/`，或只删程序目录而保留 `db/`：
+> `sudo rm -rf /opt/api-hub/{server.js,node_modules,.next,public,prisma,deploy}`
+
+**Linux（手动 systemd）**
+
+```bash
+sudo systemctl disable --now api-hub
+sudo rm /etc/systemd/system/api-hub.service && sudo systemctl daemon-reload
+sudo rm -rf /opt/api-hub
+```
+
+**Windows**
+
+```powershell
+# 默认会先把 db/ 压缩备份到桌面再卸载
+.\deploy\windows\unregister-service.ps1
+
+# 连数据一起彻底清除（需输入大写 YES 二次确认）
+.\deploy\windows\unregister-service.ps1 -Purge
+```
+
+**Docker**
+
+```bash
+docker compose down
+docker volume rm api-hub-data   # 谨慎：删除数据卷
+```
+
+卸载残留清理（可选）：
+
+```bash
+sudo rm -f /etc/logrotate.d/api-hub
+sudo rm -f /etc/nginx/conf.d/api-hub.conf /etc/nginx/snippets/api-hub-http2.conf
+sudo rm -rf /etc/api-hub        # EnvironmentFile
+sudo userdel api-hub            # 专用服务账号
 ```

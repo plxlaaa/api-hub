@@ -8,16 +8,20 @@ export const dynamic = 'force-dynamic'
 
 /** 读取网关设置（只暴露非敏感项） */
 export async function GET(req: Request) {
+  const requestId = resolveRequestId(req)
   const denied = await requireAdmin(req)
   if (denied) return denied
   const rows = await db.setting.findMany({
     where: { key: { in: ['circuitBreaker', 'cbThreshold'] } },
   })
   const map = Object.fromEntries(rows.map((r) => [r.key, r.value]))
-  return Response.json({
-    circuitBreaker: map.circuitBreaker !== 'off', // 默认开启
-    cbThreshold: Math.max(1, Number(map.cbThreshold ?? 3) || 3),
-  })
+  return jsonOk(
+    {
+      circuitBreaker: map.circuitBreaker !== 'off', // 默认开启
+      cbThreshold: Math.max(1, Number(map.cbThreshold ?? 3) || 3),
+    },
+    { requestId }
+  )
 }
 
 export async function PUT(req: Request) {

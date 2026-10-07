@@ -8,7 +8,13 @@
  *
  * 策略：默认拒绝私有网段与危险协议；确有内网自建渠道的场景用 metadata.allowInternal
  * 显式放行（管理台渠道备注里可写 allowInternal: true）。
+ *
+ * 两层校验：
+ * - checkUpstreamUrl（同步，纯字面量）：保存/导入时的快速校验，可直接单测
+ * - checkUpstreamUrlWithDns（异步，追加 DNS 解析）：额外挡住「域名解析到内网」的绕过
  */
+
+import dns from 'node:dns'
 
 const PRIVATE_HOST_PATTERNS: RegExp[] = [
   /^127\./,
@@ -106,4 +112,88 @@ export function checkUpstreamUrl(input: string, allowInternal = false): UrlCheck
 export function allowsInternalUrl(metadata: unknown): boolean {
   const m = (metadata ?? {}) as Record<string, unknown>
   return m.allowInternal === true || m.allowInternal === 'true' || m.allowInternal === 1
+}
+
+/**
+ * 判断一个已解析的 IP 字面量是否属于「不可出网」的目标。
+ *
+ * 与 PRIVATE_HOST_PATTERNS 的区别：那个只对 hostname 做字符串匹配，
+ * 挡不住「域名解析到内网」的情况 —— 例如把 baseUrl 填成
+ * `http://foo.example.com`，而该域名A 记录指向 127.0.0.1 或 169.254.169.254。
+ * 这类绕过在真实渗透里最常见，所以补一层「按解析结果判断」。
+ *
+ * 覆盖：IPv4 回环/私有/链路本地/保留段、IPv6 回环与唯一本地地址、IPv4-mapped IPv6
+ * （::ffff:127.0.0.1 这类混写写法是绕过 IPv4 校验的经典手法）。
+ */
+export function isBlockedIp(ip: string): boolean {
+  const addr = ip.trim().toLowerCase().replace(/^\[|\]$/g, '')
+  // IPv4-mapped IPv6：先剥掉 ::ffff: 前缀再按 IPv4 判，否则会漏过 ::ffff:127.0.0.1
+  const mapped = addr.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/)
+  const v4 = mapped ? mapped[1] : /^\d{1,3}(?:\.\d{1,3}){3}$/.test(addr) ? addr : null
+
+  if (v4) {
+    const parts = v4.split('.').map(Number)
+    if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) return false // 不是合法 IP，交给调用方处理
+    const [a, b] = parts
+    if (a === 127) return true // 回环
+    if (a === 10) return true // 私有 10/8
+    if (a === 172 && b >= 16 && b <= 31) return true // 私有 172.16/12
+    if (a === 192 && b === 168) return true // 私有 192.168/16
+    if (a === 169 && b === 254) return true // 链路本地（含云元数据 169.254.169.254）
+    if (a === 0) return true // 「本网络」，0.0.0.0 会被当作当前主机
+    if (a >= 224) return true // 组播与保留段
+    return false
+  }
+
+  // IPv6
+  if (addr === '::1' || addr === '::') return true
+  // fe80::/10 链路本地、fc00::/7 唯一本地
+  if (/^fe[89ab]/.test(addr)) return true
+  if (/^f[cd]/.test(addr)) return true
+  return false
+}
+
+/**
+ * 校验上游地址并把「域名解析到内网」这一类绕过也挡住。
+ *
+ * 用在「管理端保存渠道 / 探测 / 拉模型列表」这类低频路径上——
+ * 每次只做一次 DNS 解析，不在网关转发热路径上，所以没有性能顾虑。
+ * 解析失败（离线环境、DNS 抖动）时放行：此时无法判定，
+ * 交给后续真实请求去失败，比在保存阶段直接把人挡在门外更合理。
+ *
+ * @param input 用户填写的 baseUrl
+ * @param allowInternal 是否显式允许内网地址（来自渠道 metadata/备注）
+ */
+export async function checkUpstreamUrlWithDns(input: string, allowInternal = false): Promise<UrlCheckResult> {
+  const basic = checkUpstreamUrl(input, allowInternal)
+  if (!basic.ok) return basic
+  if (allowInternal) return basic // 已显式放行，不再解析
+
+  let hostname: string
+  try {
+    hostname = new URL(basic.url).hostname
+  } catch {
+    return basic // checkUpstreamUrl 已保证可解析，这里兜底
+  }
+  // 纯 IP 字面量在上一层已按字符串规则拦过，无需再查 DNS
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(hostname) || hostname.startsWith('[')) {
+    return isBlockedIp(hostname)
+      ? { ok: false, reason: `内网地址 ${hostname} 被拒绝（防止 SSRF）。若确需内网渠道，请在该渠道备注中加 allowInternal: true` }
+      : basic
+  }
+
+  try {
+    const records = await dns.promises.lookup(hostname, { all: true })
+    const blocked = records.find((r) => isBlockedIp(r.address))
+    if (blocked) {
+      return {
+        ok: false,
+        reason: `域名 ${hostname} 解析到内网地址 ${blocked.address}，已拒绝（防止 SSRF 绕过）。若确需内网渠道，请在该渠道备注中加 allowInternal: true`,
+      }
+    }
+  } catch {
+    // DNS 解析失败不在这里阻断：保存阶段无法判定，交给真实请求失败并暴露真实原因
+    return basic
+  }
+  return basic
 }

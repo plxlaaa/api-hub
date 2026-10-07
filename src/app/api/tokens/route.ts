@@ -14,6 +14,7 @@ function maskKey(key: string): string {
 }
 
 export async function GET(req: Request) {
+  const requestId = resolveRequestId(req)
   const denied = await requireAdmin(req)
   if (denied) return denied
   const tokens = await db.apiToken.findMany({ orderBy: { createdAt: 'desc' } })
@@ -25,7 +26,7 @@ export async function GET(req: Request) {
     _max: { createdAt: true },
   })
   const usageMap = new Map(usage.map((u) => [u.tokenName, u]))
-  return Response.json(
+  return jsonOk(
     tokens.map((t) => {
       const u = usageMap.get(t.name)
       return {
@@ -41,7 +42,8 @@ export async function GET(req: Request) {
           ? { calls: u._count._all, tokens: u._sum.totalTokens ?? 0, lastCallAt: u._max.createdAt }
           : { calls: 0, tokens: 0, lastCallAt: null },
       }
-    })
+    }),
+    { requestId }
   )
 }
 

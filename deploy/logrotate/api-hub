@@ -1,0 +1,33 @@
+# ============================================================
+#  API Hub 日志轮转（logrotate）
+#  安装：
+#    sudo cp deploy/logrotate/api-hub /etc/logrotate.d/api-hub
+#    sudo logrotate -d /etc/logrotate.d/api-hub   # 先干跑校验，不实际执行
+#
+#  适用场景：不用 systemd/journald 收日志，而是让应用把日志写文件
+#  （nohup 降级模式、Docker bind mount、或Windows 下 NSSM 捕获的场景）。
+#  systemd 用户请改用 journalctl + journald 自带轮转，无需本文件。
+# ============================================================
+
+/var/log/api-hub/*.log {
+    daily
+    rotate 14
+    maxsize 100M
+
+    # 日志里含渠道名与模型名，不含密钥（应用侧已脱敏），
+    # 但仍按敏感处理：压缩后轮转，不长期堆积
+    compress
+    delaycompress
+    missingok
+    notifempty
+
+    # 刻意不写 `create 0640 api-hub adm`：logrotate 遇到不存在的用户会直接放弃整个配置文件，
+    # 导致轮转静默失效。省略 user/group 时 logrotate 会沿用被轮转文件原有的属主，
+    # 对「谁在写日志就用谁的属主」这个场景恰好是正确的。
+    create 0640
+
+    # 轮转后必须让应用重开文件句柄，否则会继续往已改名的旧文件里写。
+    # systemd 模式请忽略本段（走 journald 自带轮转）；
+    # nohup 降级模式下若日志是 shell 重定向产生的，需要自行加 reload/kill -HUP。
+    # sharedcounter / dateext 组合在此无实际意义，故不启用，保持配置最小。
+}
