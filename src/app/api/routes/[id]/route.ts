@@ -2,6 +2,7 @@ import { db } from '@/lib/db'
 import { requireAdmin } from '@/lib/auth'
 import { normalizeChannelConfigs, normalizeStrategy } from '@/lib/route-config'
 import { resolveRequestId, jsonOk, jsonBadRequest, jsonError } from '@/lib/api-response'
+import { invalidateRouteCache } from '@/lib/route-cache'
 
 export const dynamic = 'force-dynamic'
 
@@ -54,6 +55,7 @@ export async function PUT(req: Request, { params }: Params) {
   if (typeof body.enabled === 'boolean') data.enabled = body.enabled
 
   await db.modelRoute.update({ where: { id }, data })
+  invalidateRouteCache()
   return jsonOk({ ok: true }, { requestId })
 }
 
@@ -63,5 +65,6 @@ export async function DELETE(req: Request, { params }: Params) {
   const { id } = await params
   const requestId = resolveRequestId(req)
   await db.modelRoute.delete({ where: { id } }).catch(() => null)
+  invalidateRouteCache()
   return jsonOk({ ok: true }, { requestId })
 }

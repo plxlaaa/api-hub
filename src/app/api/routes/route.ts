@@ -4,6 +4,7 @@ import { normalizeChannelConfigs, normalizeStrategy, parseChannelConfigs } from 
 import { parseMetadata } from '@/lib/metadata'
 import { parseStringArray } from '@/lib/json-field'
 import { resolveRequestId, jsonOk, jsonBadRequest, jsonError } from '@/lib/api-response'
+import { invalidateRouteCache } from '@/lib/route-cache'
 
 export const dynamic = 'force-dynamic'
 
@@ -99,5 +100,7 @@ export async function POST(req: Request) {
       ...(m ? { metadata: m } : {}),
     },
   })
+  // 网关转发读的是缓存表，新建路由必须立即失效，否则最长5秒内调用会404
+  invalidateRouteCache()
   return jsonOk({ id: route.id }, { requestId })
 }

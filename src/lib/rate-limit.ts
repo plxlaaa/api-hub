@@ -71,6 +71,25 @@ export function checkRateLimit(key: string, opts: RateLimitOptions): RateLimitRe
   return { ok: true, remaining: opts.max - b.hits.length, retryAfterMs: 0 }
 }
 
+/**
+ * 容量超限时腾空间：一次性淘汰一小批最早插入的桶。
+ *
+ * 原来每次只删 1 个桶（`buckets.keys().next()`）。当 key 基数持续增长（大量不同
+ * IP 暴力尝试登录）时，删除速度追不上新增速度，Map 会长期贴着 MAX_BUCKETS 上限，
+ * 新桶一进来就被立刻挤掉刚写入的桶 → 限流被静默放宽，形同虚设。
+ * 改为批量淘汰（10% 且至少 16 个），让回收速度稳定高于新增。
+ */
+function evictIfFull(): void {
+  if (buckets.size < MAX_BUCKETS) return
+  const target = Math.max(16, Math.ceil(MAX_BUCKETS * 0.1))
+  let n = 0
+  // Map 保持插入序，最早插入的 key 排在最前，删前若干个即最旧的桶
+  for (const key of buckets.keys()) {
+    buckets.delete(key)
+    if (++n >= target) break
+  }
+}
+
 /** 记一次命中并判定是否超限（check + hit 合并，避免两次遍历的竞态） */
 export function hitRateLimit(key: string, opts: RateLimitOptions): RateLimitResult {
   ensureSweeper()
@@ -78,11 +97,7 @@ export function hitRateLimit(key: string, opts: RateLimitOptions): RateLimitResu
   const cutoff = now - opts.windowMs
   let b = buckets.get(key)
   if (!b) {
-    if (buckets.size >= MAX_BUCKETS) {
-      // 简易保护：满了就清空最旧的一批（宁可放宽限流也不至于打满内存）
-      const oldest = buckets.keys().next()
-      if (!oldest.done) buckets.delete(oldest.value)
-    }
+    evictIfFull()
     b = { hits: [] }
     buckets.set(key, b)
   }

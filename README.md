@@ -195,6 +195,18 @@ sudo systemctl daemon-reload && sudo systemctl enable --now api-hub
 | `deploy/env/api-hub.env.example` | 端口/时区/日志级别配置样例 |
 | `deploy/windows/register-service.ps1` | Windows 服务注册（含崩溃重启、日志轮转） |
 | `deploy/windows/unregister-service.ps1` | 卸载（默认先备份 `db/`） |
+| `deploy/windows/verify-deploy.ps1` | Windows 部署自检（服务状态、开机自启、健康检查） |
+| `scripts/verify-deploy.sh` | Linux/macOS 部署自检（零依赖，退出码可用于流水线） |
+| `scripts/pack-standalone.sh` | 免依赖 tarball 打包（自动剔除 `db/` 防泄漏凭据） |
+
+**装完先跑一次自检**，一次性查出「进程在跑但数据库连不上」「端口被占」「管理接口没鉴权」
+「db 目录不可写」这类装完最容易踩、又最难自己定位的问题：
+
+```bash
+bash scripts/verify-deploy.sh    # Windows：powershell -File deploy\windows\verify-deploy.ps1
+```
+
+全部通过返回退出码 0，可直接作为部署流水线的卡点。
 
 完整的**防火墙**、**升级与卸载**、**FAQ** 见 [INSTALL.md](INSTALL.md)。
 
@@ -248,6 +260,18 @@ curl http://localhost:3000/v1/chat/completions \
 3. **metadata Json 字段**——实验配置先放 metadata 验证，稳定再升级正式列
 
 详见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+
+### 热路径与缓存
+
+网关是 QPS 最高的路径，几个刻意的取舍：
+
+- **路由表走短 TTL 缓存**（`src/lib/route-cache.ts`，5s + 写入即失效）：路由是「读多写少」
+  数据，此前每次转发都要整表 `findMany`。路由增删改、配置导入都会主动失效缓存，
+  所以改完路由**立即生效**，不必等 TTL。**渠道刻意不缓存**——`autoDisabled` 由熔断与
+  探测高频改动，缓存会导致「已熔断渠道仍被选中」。
+- **统计聚合在内存分桶**：`/api/stats` 查询数 21 → 2；仪表盘每 8 秒轮询也不会压垮 SQLite。
+- **游标分页**：日志是只增不改的追加流，深翻页不再全表扫描。
+- 缓存查库失败时**抛错而非回退陈旧数据**——转发用错配置比慢一点严重得多。
 
 ## 健康检查与日志排错
 

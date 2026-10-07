@@ -6,6 +6,56 @@
 ## [未发布]
 
 ### 新增
+- **路由表缓存** `src/lib/route-cache.ts`：网关转发与 `/v1/models` 此前每次请求都要
+  `findMany` 整张路由表，是QPS 最高路径上的重复全表查询。现按「读多写少」特征做
+  短 TTL（5s）缓存 + **写入即失效**（路由增删改、配置导入四处写入点全部主动
+  `invalidateRouteCache()`），并用单飞（inflight 合并）防止并发击穿。
+  刻意**不缓存渠道**：`autoDisabled` 由熔断与探测高频改动，缓存会导致「已熔断渠道仍被选中」。
+  查库失败时抛错而**不回退陈旧数据** —— 配置错比慢一点严重得多。
+- **部署自检脚本**（两端对等，均零依赖、可用于部署流水线判定，退出码 0/1）：
+  - `scripts/verify-deploy.sh`：Linux/macOS。检查 Node 版本、端口监听、`/api/health`
+    数据库可用性、**管理接口是否真的拒绝未授权访问**、systemd 状态、`db/` 可写性。
+    兼容无 curl 环境（自动退化到 wget）。
+  - `deploy/windows/verify-deploy.ps1`：Windows。检查项与Linux 版一一对应，
+    额外校验 Windows 服务运行状态与开机自启（`StartMode=Automatic`）。
+    所有 Windows 专用 cmdlet（`Get-Service`/`Get-CimInstance`/`Get-NetTCPConnection`）
+    均先探测可用性再调用，在 PowerShell 7 for Linux 上也不会中断脚本。
+- 单元测试 `tests/route-cache.test.ts`：8 个用例，覆盖缓存命中/TTL 过期/主动失效、
+  并发击穿合并（20 并发只查库 1 次）、查库失败抛错与恢复、限流桶高基数淘汰。
+
+### 变更
+- **`Retry-After` 改为实测值**：限流429 此前写死 `Retry-After: 10`，与实际剩余窗口
+  （最长可达 60s）不符，客户端 SDK 会提前重试并再次被拒，形成重试风暴。
+  现取限流器返回的真实 `retryAfterMs`（向上取整，至少 1s）。
+- 网关日志裁剪改为固定 2 条查询：原实现每次触发要做 `count()` 全表扫 +
+  `findMany({ skip: 2000 })` 扫过并丢弃前 2000 行 + `deleteMany({ id: { in: [...] } })`
+  拼出上千个 id 的 IN 列表。现取「倒数第 2000 条」的时间戳作分界，一条 `deleteMany`
+  按 `createdAt` 之前删除，开销与表大小基本无关。
+
+### 修复
+- **`/api/overview` 渠道平均延迟算错**：groupBy 按 `(channelName, ok)` 分组后，
+  原代码对各组 `_avg` 再取算术平均 —— 这是「组均值的均值」，组大小差异大时明显偏移
+  （一个 2 次调用的渠道会与一个 500 次调用的渠道等权）。现改用 `_sum` + 内存加权平均，
+  口径与 `/api/stats`、`/api/channels` 统一为「仅成功请求计入延迟」。
+- **限流桶淘汰速度追不上新增速度**：`hitRateLimit` 在桶数达到上限时**只删 1 个**桶
+  （注释却写「清空最旧的一批」）。当 key 基数持续增长（如大量不同 IP 撞库）时，
+  Map 长期贴着上限，新桶一写入就被立刻挤掉刚写入的桶 → **限流被静默放宽、形同虚设**。
+  现批量淘汰（10% 且至少 16 个），回收速度稳定高于新增。
+- **网关早期失败时拿不到 `X-Request-Id`**：`/v1/models` 与 `/v1/chat/completions` 的
+  鉴权 401、缺 model、非法 JSON 等分支此前不带请求 ID，客户端无法与服务端日志对账。
+  现由`handleChatCompletions` 统一兜底补齐，成功响应也回传该头。
+- 删除 Next.js 脚手架遗留的 `src/app/api/route.ts`（`Hello, world!` 占位路由）。
+
+### 安全
+- SSRF 防护从「字面量判断」升级为「字面量 + DNS 解析后 IP 判定」，可拦截
+  指向 `127.0.0.1`、`10.x`、`192.168.x`、链路本地 `169.254.169.254` 的域名，
+  以及 IPv4-mapped IPv6 写法。已接入渠道保存/更新、配置导入、fetch-models 三处入口。
+- 配置导入规模上限（`MAX_CHANNELS=500` / `MAX_ROUTES=1000`），文件内重复项只保留首个。
+- 打包脚本对暂存目录做凭据/数据库文件二次校验，命中即中止，防止发布包泄漏 API Key。
+
+## [V28] — 2026-10-07
+
+### 新增
 - **配置导入/导出保真**：`/api/config/export` 补齐 `percent`、`activeHours`、`metadata`
   字段，导入导出往返不再丢配置（此前导出的渠道缺少这三个字段，回导后调度比例与时段失效）。
 - **配置导入纯函数层** `src/lib/config-import.ts`：把归一化逻辑从路由里抽出为
@@ -87,7 +137,6 @@
 - 非法 `mode` 值退化为 `merge` 而非 `replace`，避免误删线上配置。
 - 超长或含非法字符的 `X-Request-Id` 请求头此前会被**截断**后放行，不同请求可能撞到同一
   ID 导致日志串联误导；现改为整段拒绝并重新生成。
-- 删除 Next.js 脚手架遗留的 `src/app/api/route.ts`（`Hello, world!` 占位路由）。
 
 ### 安全
 - SSRF 防护从「字面量判断」升级为「字面量 + DNS 解析后 IP 判定」，可拦截
@@ -108,5 +157,6 @@
 - 客户端断开即中止上游请求，不白烧额度。
 - 统一 Key 限速+ 配额原子扣减；SQLite WAL + 忙等超时；熔断冷却期防抖动。
 
-[未发布]: https://github.com/plxlaaa/api-hub/compare/v27...HEAD
+[未发布]: https://github.com/plxlaaa/api-hub/compare/v28...HEAD
+[V28]: https://github.com/plxlaaa/api-hub/compare/v27...v28
 [V27]: https://github.com/plxlaaa/api-hub/releases/tag/v27

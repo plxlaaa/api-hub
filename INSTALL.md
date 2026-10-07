@@ -24,6 +24,15 @@
 | `deploy/logrotate/api-hub` | 日志文件轮转（不走 journald 时才需要） |
 | `deploy/windows/register-service.ps1` | 手动把已装好的目录注册为 Windows 服务 |
 | `deploy/windows/unregister-service.ps1` | 卸载 Windows 服务（默认保留数据） |
+| `deploy/windows/verify-deploy.ps1` | **Windows 部署自检**（服务状态、开机自启、健康检查、目录可写） |
+| `scripts/verify-deploy.sh` | **Linux/macOS 部署自检**（Node 版本、端口、健康检查、systemd、目录可写） |
+| `scripts/pack-standalone.sh` | 打包免依赖 tarball（自动剔除 `db/` 防止泄漏凭据） |
+
+> **装完先跑一次自检**：`bash scripts/verify-deploy.sh`（Windows：
+> `powershell -ExecutionPolicy Bypass -File deploy/windows/verify-deploy.ps1`）。
+> 它会一次性告诉你「进程在跑但数据库连不上」「端口被占」「管理接口没鉴权」
+> 「db 目录不可写」这类装完最容易踩、却最难自己定位的问题，全部通过返回退出码 0，
+> 可直接用在部署流水线里做卡点。
 
 ---
 
@@ -467,6 +476,58 @@ curl -fsS http://127.0.0.1:3000/api/health
 
 > 早期版本曾用 `/api/auth/status` 当探针，但它只反映「是否已初始化」，
 > **数据库挂了它照样返回 200**。请统一改用 `/api/health`。
+
+### 一键部署自检（推荐装完先跑）
+
+手敲 curl 只能看到「服务通不通」，看不到「配置对不对」。仓库自带两端对等的自检脚本，
+把装完后最常见的 6 类问题一次查清：
+
+```bash
+# Linux / macOS
+bash scripts/verify-deploy.sh                      # 默认查 http://127.0.0.1:3000
+bash scripts/verify-deploy.sh http://127.0.0.1:8080 # 指定地址
+PORT=8080 bash scripts/verify-deploy.sh            # 或用环境变量
+```
+
+```powershell
+# Windows（PowerShell 5.1 与 7+ 均可）
+powershell -ExecutionPolicy Bypass -File deploy\windows\verify-deploy.ps1
+powershell -ExecutionPolicy Bypass -File deploy\windows\verify-deploy.ps1 -BaseUrl http://127.0.0.1:8080
+```
+
+检查项：
+
+| # | 检查 | 失败意味着 |
+|---|------|-----------|
+| 1 | Node 版本 ≥ 20 | 独立产物用了 Node 20+ 特性，低版本会直接起不来 |
+| 2 | 端口处于监听 | 进程没起来，或被别的进程占了端口 |
+| 3 | `/api/health` 数据库可用 | **最关键**：进程活着但 DB 连不上，此时不该导流量 |
+| 4 | 管理接口拒绝未授权访问 | 返回 200 意味着鉴权失效，属高危 |
+| 5 | 服务运行 + 开机自启（systemd / Windows 服务） | 重启后不会自动拉起 |
+| 6 | `db/` 目录可写 | 服务将无法落库，表现为「一切正常但数据不保存」 |
+
+输出示例（正常）：
+
+```
+1. 运行环境
+  ✓ Node v20.11.0
+2. 端口监听
+  ✓ 端口 3000 处于监听状态
+3. 健康检查（最关键的一项）
+  ✓ 数据库可用（status=ok）
+...
+检查结果：6 项通过，0 项失败
+部署正常。
+```
+
+全部通过返回**退出码 0**，任一失败返回**1**，可直接用于部署流水线卡点：
+
+```bash
+bash scripts/verify-deploy.sh || { echo "自检未通过，终止部署"; exit 1; }
+```
+
+Windows 版额外校验**开机自启**（`StartMode=Automatic`），这是 Linux 版没有的能力。
+两端在非本机环境（如 PowerShell 7 for Linux）下会自动跳过平台专属检查，不会中断脚本。
 
 ### 排错时对照界面
 

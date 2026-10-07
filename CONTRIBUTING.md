@@ -27,13 +27,19 @@ bash scripts/pack-standalone.sh /tmp/pack-check.tar.gz   # 若改动了构建/�
 | `deploy/systemd/*.service` | `systemd-analyze verify deploy/systemd/api-hub.service` |
 | `deploy/nginx/*` | `nginx -t -c <临时配置>`（需把 `limit_req_zone` 置于 http 上下文） |
 | `deploy/logrotate/*` | `logrotate -d deploy/logrotate/api-hub` |
-| `deploy/windows/*.ps1` | PowerShell `[System.Management.Automation.Language.Parser]::ParseFile(...)` |
+| `deploy/windows/*.ps1` | `pwsh -NoProfile -File <脚本>`（能实际跑就别只做语法检查） |
+| `scripts/verify-deploy.sh` | `bash -n scripts/verify-deploy.sh` + 对着跑起来的服务实跑一遍 |
 
 > 这几份配置都有过「工具直接报错/静默失效」的坑（`StartLimitIntervalSec` 位置错误、
 > `limit_req_zone` 作用域错误、`create 0640 <不存在的用户>` 导致整个配置被跳过），
 > 改动后务必实测。
+>
+> PowerShell 脚本另有一个坑：Windows 专用 cmdlet（`Get-Service` / `Get-CimInstance` /
+> `Get-NetTCPConnection`）在 PowerShell 7 for Linux 上不存在，直接调用会让脚本**中途崩溃**。
+> 新增这类调用前先用 `Get-Command <cmdlet>` 探测；硬编码盘符路径（`C:\...`）前先判`$IsWindows`，
+> 否则 `Join-Path` 会抛 "Cannot find drive"。
 
-## 代码约定
+##代码约定
 
 - **纯函数优先**：能抽成零 IO 纯函数的逻辑（归一化、聚合、判定）一律抽到 `src/lib/`，
   路由只负责编排。这样才能用 `node --test` 直接单测。
@@ -44,6 +50,12 @@ bash scripts/pack-standalone.sh /tmp/pack-check.tar.gz   # 若改动了构建/�
 - **请求 ID**：新接口一律 `resolveRequestId` + 透传 `X-Request-Id`。
 - **上游地址**：任何用管理员输入的 URL 出网的地方，都要过
   `checkUpstreamUrlWithDns`（`src/lib/url-safety.ts`）。
+- **写路由表必须失效缓存**：网关转发读的是 `getEnabledRoutes()`的缓存
+  （`src/lib/route-cache.ts`）。任何 `db.modelRoute` 的写入点（增/删/改、配置导入）
+  完成后都要调用 `invalidateRouteCache()`，否则最长 5 秒内新配置不生效——
+  表现为「刚建的路由调用却404」。已有的失效点见 `api/routes/route.ts`、
+  `api/routes/[id]/route.ts`、`api/config/import/route.ts`。
+  **渠道（Channel）刻意不缓存**，无需为此新增失效调用。
 
 ## 测试
 

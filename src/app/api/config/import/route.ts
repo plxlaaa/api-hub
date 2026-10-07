@@ -4,6 +4,7 @@ import { resolveRequestId, jsonOk, jsonServerError, jsonBadRequest } from '@/lib
 import { planImport, resolveChannelRefs, buildImportResult } from '@/lib/config-import'
 import { checkUpstreamUrlWithDns, allowsInternalUrl } from '@/lib/url-safety'
 import { normalizeChannelConfigs } from '@/lib/route-config'
+import { invalidateRouteCache } from '@/lib/route-cache'
 import { log } from '@/lib/logger'
 
 export const dynamic = 'force-dynamic'
@@ -145,6 +146,9 @@ export async function POST(req: Request) {
       })
       routesAdded++
     }
+
+    // 导入增删了大量路由，网关缓存必须立即失效（replace 模式更是全表重写）
+    invalidateRouteCache()
 
     const result = buildImportResult({
       channelsAdded,

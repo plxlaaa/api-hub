@@ -9,6 +9,7 @@ import { hitRateLimit } from '@/lib/rate-limit'
 import { log, withRequestId } from '@/lib/logger'
 import { resolveRequestId, openAiError } from '@/lib/api-response'
 import { resolveRoute, shouldTripBreaker } from '@/lib/route-resolver'
+import { getEnabledRoutes, invalidateRouteCache, logCacheHitOnce } from '@/lib/route-cache'
 
 const UPSTREAM_TIMEOUT_MS = 300_000 // 长回答 / 长流式给足时间
 const MAX_REQUEST_LOGS = 2000
@@ -104,20 +105,41 @@ async function logRequest(data: {
         error: data.error ?? null,
       },
     })
-    if (Math.random() < 0.05) {
-      const count = await db.requestLog.count()
-      if (count > MAX_REQUEST_LOGS) {
-        const stale = await db.requestLog.findMany({
-          orderBy: { createdAt: 'desc' },
-          skip: MAX_REQUEST_LOGS,
-          take: count - MAX_REQUEST_LOGS,
-          select: { id: true },
-        })
-        await db.requestLog.deleteMany({ where: { id: { in: stale.map((l) => l.id) } } })
-      }
-    }
+    // 概率触发清理（1/20）：高频路径上每条都 count/排序会明显拖慢写入，
+    // 且清理只需最终收敛，无需每次精确。
+    if (Math.random() < 0.05) await pruneRequestLogs()
   } catch (err) {
     log.error('写入调用日志失败', { error: err })
+  }
+}
+
+/**
+ * 裁剪调用日志到 MAX_REQUEST_LOGS 条。
+ *
+ * 只取「倒数第 MAX_REQUEST_LOGS 条」那一条的时间戳作为分界，再用一条
+ * deleteMany 按 createdAt 之前删除。此前是
+ * `count()` + `findMany({ skip: MAX })` + `deleteMany({ id: { in: [...] } })`：
+ * 1) count() 每次全表扫；
+ * 2) skip 2000 行在 SQLite 上要真实扫过并丢弃前 2000 行；
+ * 3) deleteMany 的 IN 列表可能上千个 id，SQL 文本巨大且易触及变量数上限。
+ * 现固定为 2 条查询，开销与表大小基本无关。
+ */
+async function pruneRequestLogs(): Promise<void> {
+  try {
+    // 倒数第 MAX_REQUEST_LOGS 条；返回 null 表示未超上限，无需清理
+    const boundary = await db.requestLog.findFirst({
+      orderBy: { createdAt: 'desc' },
+      skip: MAX_REQUEST_LOGS,
+      select: { createdAt: true },
+    })
+    if (!boundary) return
+    const { count } = await db.requestLog.deleteMany({
+      where: { createdAt: { lt: boundary.createdAt } },
+    })
+    if (count > 0) log.debug('调用日志已裁剪', { deleted: count, keep: MAX_REQUEST_LOGS })
+  } catch (err) {
+    // 清理失败不影响主流程，后续随机触发时会重试
+    log.warn('调用日志清理失败（继续运行）', { error: err })
   }
 }
 
@@ -139,19 +161,28 @@ function rateLimitPerMin(metadata: unknown): number {
 /**
  * 原子扣减配额并占用一次限速额度：一条 updateMany 同时完成「检查未超额」+「计数 +1」。
  * 并发下不会超发（SQLite 单写者语义保证 updateMany 的条件判断与写入是原子的）。
- * @returns 成功返回 null；超配额返回 'quota'；超限速返回 'rate'
+ *
+ * @returns 成功返回 null；超配额返回 { kind:'quota' }；超限速返回
+ *   { kind:'rate', retryAfterSec } —— 重试秒数取自限流器实测剩余窗口，
+ *   而不是写死：写死会让客户端提前重试并再次被拒，形成重试风暴。
  */
-async function consumeQuotaAndRate(token: { id: string; quotaLimit: number | null }, perMin: number): Promise<'quota' | 'rate' | null> {
+async function consumeQuotaAndRate(
+  token: { id: string; quotaLimit: number | null },
+  perMin: number
+): Promise<{ kind: 'quota' } | { kind: 'rate'; retryAfterSec: number } | null> {
   if (perMin > 0) {
     const rl = hitRateLimit(`gw:${token.id}`, { windowMs: 60_000, max: perMin })
-    if (!rl.ok) return 'rate'
+    if (!rl.ok) {
+      // 向上取整并至少 1s，避免算出 0 秒让客户端立刻重试
+      return { kind: 'rate', retryAfterSec: Math.max(1, Math.ceil(rl.retryAfterMs / 1000)) }
+    }
   }
   if (token.quotaLimit === null) return null
   const res = await db.apiToken.updateMany({
     where: { id: token.id, quotaUsed: { lt: token.quotaLimit } },
     data: { quotaUsed: { increment: 1 }, lastUsedAt: new Date() },
   })
-  if (res.count === 0) return 'quota'
+  if (res.count === 0) return { kind: 'quota' }
   return null
 }
 
@@ -208,7 +239,13 @@ export async function handleChatCompletions(
   // 这样一次调用产生的多条日志能被 requestId 串起来，便于排障。
   const requestId = resolveRequestId(req)
   const startedAt = Date.now()
-  const res = await withRequestId(requestId, () => dispatchChatCompletions(req, opts, requestId))
+  let res = await withRequestId(requestId, () => dispatchChatCompletions(req, opts, requestId))
+  // 兜底补齐 X-Request-Id：下面各分支的错误响应有的带、有的不带，
+  // 客户端若在早期失败（缺 model / 非法 JSON）就拿不到排障用的 ID。
+  // 统一在这里补一次，已有同值则跳过（Headers.set 为覆盖写，值相同无副作用）。
+  if (!res.headers.has('X-Request-Id')) {
+    res = new Response(res.body, { status: res.status, statusText: res.statusText, headers: withRequestIdHeader(res.headers, requestId) })
+  }
   log.info('网关请求完成', {
     requestId,
     status: res.status,
@@ -216,6 +253,13 @@ export async function handleChatCompletions(
     adminOverride: Boolean(opts?.adminOverride),
   })
   return res
+}
+
+/** 复制一份 Headers 并补上 X-Request-Id（不污染上游响应的原始头对象） */
+function withRequestIdHeader(headers: Headers, requestId: string): Headers {
+  const h = new Headers(headers)
+  h.set('X-Request-Id', requestId)
+  return h
 }
 
 /** 实际转发逻辑（由 handleChatCompletions 包装，注入 requestId 便于错误响应回传） */
@@ -235,7 +279,8 @@ async function dispatchChatCompletions(
     const key = auth.startsWith('Bearer ') ? auth.slice(7).trim() : ''
     const t = await authenticate(key)
     if (!t) {
-      return openAiError('API Key 无效或已禁用（请使用网关统一 Key）', 'invalid_request_error', 401)
+      //带上 requestId：鉴权失败同样要能与服务端日志对上（此前 401 唯独缺这个头）
+      return openAiError('API Key 无效或已禁用（请使用网关统一 Key）', 'invalid_request_error', 401, { requestId })
     }
     token = t
     perMin = rateLimitPerMin(t.metadata)
@@ -278,26 +323,30 @@ async function dispatchChatCompletions(
   // 4. 限速 + 配额原子扣减（放在模型解析之后，避免无效请求白吃配额）
   if (!adminOverride) {
     const verdict = await consumeQuotaAndRate(token, perMin)
-    if (verdict === 'quota') {
+    if (verdict?.kind === 'quota') {
       return openAiError(
         `配额已用尽：该 Key 已达上限 ${token.quotaLimit} 次请求，请在管理台调整配额`,
         'insufficient_quota',
-        429
+        429,
+        { requestId }
       )
     }
-    if (verdict === 'rate') {
+    if (verdict?.kind === 'rate') {
       return openAiError(
-        `请求过于频繁：该 Key 限速 ${perMin} 次/分钟，请稍后重试`,
+        `请求过于频繁：该 Key 限速 ${perMin} 次/分钟，请 ${verdict.retryAfterSec} 秒后重试`,
         'rate_limit_error',
         429,
-        { headers: { 'Retry-After': '10' }, requestId }
+        // Retry-After 用实测剩余窗口，客户端 SDK（OpenAI/Anthropic）据此自动退避
+        { headers: { 'Retry-After': String(verdict.retryAfterSec) }, requestId }
       )
     }
   }
 
   // 5. 路由解析 v2（route-resolver）：精确 → 正则（re:xxx）→ 最长前缀（gpt-*）→ 兜底（*），
-  //    同特异性按 metadata.priority 决胜；密钥准入（allow/denyTokens）不通过则自动降级到下一候选
-  const enabledRoutes = await db.modelRoute.findMany({ where: { enabled: true }, orderBy: { createdAt: 'asc' } })
+  //    同特异性按metadata.priority 决胜；密钥准入（allow/denyTokens）不通过则自动降级到下一候选
+  //    路由表读多写少，走短 TTL 缓存（路由增删改时主动失效，见 lib/route-cache.ts）
+  const enabledRoutes = await getEnabledRoutes()
+  logCacheHitOnce()
   const resolved = resolveRoute(enabledRoutes, requestedModel, { tokenName: token.name })
   if (resolved.kind === 'none') {
     return openAiError(resolved.reason, 'invalid_request_error', 404)
@@ -557,23 +606,28 @@ async function dispatchChatCompletions(
 
 /** GET /v1/models：返回所有启用的模型显示名（OpenAI 格式） */
 export async function handleListModels(req: Request): Promise<Response> {
+  const requestId = resolveRequestId(req)
   const auth = req.headers.get('authorization') || ''
   const key = auth.startsWith('Bearer ') ? auth.slice(7).trim() : ''
   const token = await authenticate(key)
   if (!token) {
-    return openAiError('API Key 无效或已禁用（请使用网关统一 Key）', 'invalid_request_error', 401)
+    return openAiError('API Key 无效或已禁用（请使用网关统一 Key）', 'invalid_request_error', 401, { requestId })
   }
-  const routes = await db.modelRoute.findMany({ where: { enabled: true }, orderBy: { createdAt: 'asc' } })
-  return Response.json({
-    object: 'list',
-    // 纯兜底路由 "*" 不进模型列表（客户端无需看见）；前缀通配（如 gpt-*）保留展示
-    data: routes
-      .filter((r) => r.displayName !== '*')
-      .map((r) => ({
-        id: r.displayName,
-        object: 'model',
-        created: Math.floor(r.createdAt.getTime() / 1000),
-        owned_by: 'api-gateway',
-      })),
-  })
+  const routes = await getEnabledRoutes()
+  return new Response(
+    JSON.stringify({
+      object: 'list',
+      // 纯兜底路由 "*" 不进模型列表（客户端无需看见）；前缀通配（如 gpt-*）保留展示
+      data: routes
+        .filter((r) => r.displayName !== '*')
+        .map((r) => ({
+          id: r.displayName,
+          object: 'model',
+          created: Math.floor(r.createdAt.getTime() / 1000),
+          owned_by: 'api-gateway',
+        })),
+    }),
+    // 与转发接口保持一致：成功响应也回传 X-Request-Id，便于客户端全链路对账
+    { headers: withRequestIdHeader(new Headers({ 'Content-Type': 'application/json' }), requestId) }
+  )
 }
