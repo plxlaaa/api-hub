@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowDown, ArrowUp, Copy, FlaskConical, Loader2, Pencil, Plus, RefreshCw, Route, Trash2, X, XCircle } from 'lucide-react'
+import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, Copy, FlaskConical, Loader2, Pencil, Plus, RefreshCw, Route, SlidersHorizontal, Trash2, X, XCircle } from 'lucide-react'
 import { toast } from 'sonner'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import {
@@ -40,9 +40,21 @@ interface RouteForm {
   priceOut: string
   remark: string
   enabled: boolean
+  /** 高级设置（存 metadata）：路由优先级 / 故障转移上限 / 密钥黑白名单（逗号分隔） */
+  priority: string
+  maxAttempts: string
+  allowTokens: string
+  denyTokens: string
 }
 
-const EMPTY_FORM: RouteForm = { displayName: '', targetModel: '', channelConfigs: [], strategy: 'priority', priceIn: '', priceOut: '', remark: '', enabled: true }
+const EMPTY_FORM: RouteForm = { displayName: '', targetModel: '', channelConfigs: [], strategy: 'priority', priceIn: '', priceOut: '', remark: '', enabled: true, priority: '', maxAttempts: '', allowTokens: '', denyTokens: '' }
+
+/** metadata 里的 token 名集（数组或逗号串，兼容历史数据）→ 表单展示用的逗号串 */
+function tokenMetaToStr(v: unknown): string {
+  if (typeof v === 'string') return v
+  if (Array.isArray(v)) return v.filter((x): x is string => typeof x === 'string').join(', ')
+  return ''
+}
 
 
 export function RoutesTab() {
@@ -60,6 +72,8 @@ export function RoutesTab() {
   const [dialogOpen, setDialogOpen] = useState(false)
   const [form, setForm] = useState<RouteForm>(EMPTY_FORM)
   const [deleteId, setDeleteId] = useState<string | null>(null)
+  // 高级设置（metadata）默认折叠；编辑已有配置的路由时自动展开
+  const [advOpen, setAdvOpen] = useState(false)
 
   // 尝试顺序预览：策略/渠道/顺序变化时自动重算（防抖 400ms），与网关共用后端排序
   const [previewData, setPreviewData] = useState<{ ordered: Array<{ id: string; name: string; model: string | null; basis: string }>; unavailable: Array<{ id: string; name: string; reason: string }> } | null>(null)
@@ -94,7 +108,7 @@ export function RoutesTab() {
   const channelModels = useMemo(() => new Map(channels.map((c) => [c.id, c.models])), [channels])
   const allModels = useMemo(() => Array.from(new Set(channels.flatMap((c) => c.models))).sort(), [channels])
 
-  const openCreate = () => { setForm(EMPTY_FORM); setPreviewData(null); setPreviewErr(''); setDialogOpen(true) }
+  const openCreate = () => { setForm(EMPTY_FORM); setPreviewData(null); setPreviewErr(''); setAdvOpen(false); setDialogOpen(true) }
   const openEdit = (r: ModelRoute) => {
     setForm({
       id: r.id,
@@ -106,7 +120,12 @@ export function RoutesTab() {
       priceOut: r.priceOut == null ? '' : String(r.priceOut),
       remark: r.remark || '',
       enabled: r.enabled,
+      priority: r.metadata?.priority != null ? String(r.metadata.priority) : '',
+      maxAttempts: r.metadata?.maxAttempts != null ? String(r.metadata.maxAttempts) : '',
+      allowTokens: tokenMetaToStr(r.metadata?.allowTokens),
+      denyTokens: tokenMetaToStr(r.metadata?.denyTokens),
     })
+    setAdvOpen(Boolean(r.metadata?.priority != null || r.metadata?.maxAttempts != null || r.metadata?.allowTokens != null || r.metadata?.denyTokens != null))
     setPreviewData(null)
     setPreviewErr('')
     setDialogOpen(true)
@@ -163,6 +182,27 @@ export function RoutesTab() {
 
   const save = useMutation({
     mutationFn: (f: RouteForm) => {
+      // 高级设置 → metadata（仅收非空项；token 名集存逗号分隔字符串，resolver 兼容数组）
+      const meta: Record<string, string | number | boolean> = {}
+      if (f.priority.trim() !== '') {
+        const p = Number(f.priority)
+        if (!Number.isFinite(p)) throw new Error('路由优先级需为数字')
+        meta.priority = Math.round(p)
+      }
+      if (f.maxAttempts.trim() !== '') {
+        const ma = Number(f.maxAttempts)
+        if (!Number.isFinite(ma) || Math.round(ma) < 1) throw new Error('故障转移上限需为 ≥1 的整数')
+        meta.maxAttempts = Math.round(ma)
+      }
+      const splitTokens = (s: string) => s.split(/[,，]/).map((x) => x.trim()).filter(Boolean)
+      const allow = splitTokens(f.allowTokens)
+      if (allow.length) meta.allowTokens = allow.join(',')
+      const deny = splitTokens(f.denyTokens)
+      if (deny.length) meta.denyTokens = deny.join(',')
+      if (allow.length && deny.length) {
+        const overlap = allow.filter((x) => deny.includes(x))
+        if (overlap.length) throw new Error(`密钥同时出现在白/黑名单：${overlap.join('、')}`)
+      }
       const payload = {
         displayName: f.displayName,
         targetModel: f.targetModel,
@@ -179,6 +219,7 @@ export function RoutesTab() {
         priceIn: f.priceIn.trim() === '' ? null : Number(f.priceIn),
         priceOut: f.priceOut.trim() === '' ? null : Number(f.priceOut),
         enabled: f.enabled,
+        metadata: Object.keys(meta).length > 0 ? meta : null,
       }
       return f.id
         ? api(`/api/routes/${f.id}`, { method: 'PUT', body: JSON.stringify(payload) })
@@ -360,7 +401,21 @@ export function RoutesTab() {
                     case 'displayName':
                       return (
                         <div className="min-w-0">
-                          <p className="mono-id font-medium">{r.displayName}</p>
+                          <p className="mono-id flex flex-wrap items-center gap-1 font-medium">
+                            {r.displayName}
+                            {r.metadata?.priority != null && (
+                              <Badge variant="outline" className="px-1 py-0 text-micro" title="路由优先级（大者先匹配）">P{String(r.metadata.priority)}</Badge>
+                            )}
+                            {r.metadata?.maxAttempts != null && (
+                              <Badge variant="outline" className="px-1 py-0 text-micro" title="故障转移上限（最多尝试渠道数）">试{String(r.metadata.maxAttempts)}</Badge>
+                            )}
+                            {tokenMetaToStr(r.metadata?.allowTokens) && (
+                              <Badge variant="outline" className="px-1 py-0 text-micro" title={`仅限密钥：${tokenMetaToStr(r.metadata?.allowTokens)}`}>白名单</Badge>
+                            )}
+                            {tokenMetaToStr(r.metadata?.denyTokens) && (
+                              <Badge variant="outline" className="border-status-warn/40 bg-status-warn-soft px-1 py-0 text-micro text-status-warn" title={`拒绝密钥：${tokenMetaToStr(r.metadata?.denyTokens)}`}>黑名单</Badge>
+                            )}
+                          </p>
                           {r.remark && <p className="truncate text-micro text-muted-foreground">{r.remark}</p>}
                         </div>
                       )
@@ -631,6 +686,47 @@ export function RoutesTab() {
                 <Label>输出价格（$ / 百万 token）</Label>
                 <Input type="number" min={0} step="any" placeholder="留空 = 未标注；0 = 免费" value={form.priceOut} onChange={(e) => setForm({ ...form, priceOut: e.target.value })} />
               </div>
+            </div>
+
+            {/* 高级设置：路由级 metadata（priority / maxAttempts / 密钥黑白名单） */}
+            <div className="rounded-md border p-3">
+              <button type="button" className="flex w-full items-center justify-between" onClick={() => setAdvOpen((v) => !v)} aria-expanded={advOpen}>
+                <span className="flex items-center gap-1.5 text-sm font-medium">
+                  <SlidersHorizontal className="h-3.5 w-3.5 text-muted-foreground" />
+                  高级设置（可选）
+                  {(form.priority || form.maxAttempts || form.allowTokens || form.denyTokens) && (
+                    <Badge variant="outline" className="px-1 py-0 text-micro">已配置</Badge>
+                  )}
+                </span>
+                {advOpen ? <ChevronUp className="h-4 w-4 text-muted-foreground" /> : <ChevronDown className="h-4 w-4 text-muted-foreground" />}
+              </button>
+              {advOpen && (
+                <div className="mt-3 space-y-3">
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div className="space-y-1.5">
+                      <Label>路由优先级</Label>
+                      <Input type="number" step={1} placeholder="缺省 0" value={form.priority} onChange={(e) => setForm({ ...form, priority: e.target.value })} />
+                      <p className="text-xs text-muted-foreground">同层多路由同时命中时，数字大者胜出</p>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>故障转移上限</Label>
+                      <Input type="number" min={1} step={1} placeholder="缺省不限" value={form.maxAttempts} onChange={(e) => setForm({ ...form, maxAttempts: e.target.value })} />
+                      <p className="text-xs text-muted-foreground">最多实际尝试的渠道数，防止坏请求烧穿全部渠道</p>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>密钥白名单</Label>
+                      <Input placeholder="逗号分隔，留空 = 不限" value={form.allowTokens} onChange={(e) => setForm({ ...form, allowTokens: e.target.value })} />
+                      <p className="text-xs text-muted-foreground">只有名单内的密钥名能命中此路由，其余自动降级兜底</p>
+                    </div>
+                    <div className="space-y-1.5">
+                      <Label>密钥黑名单</Label>
+                      <Input placeholder="逗号分隔，留空 = 无" value={form.denyTokens} onChange={(e) => setForm({ ...form, denyTokens: e.target.value })} />
+                      <p className="text-xs text-muted-foreground">命中黑名单的密钥直接拒用此路由（黑名单优先于白名单）</p>
+                    </div>
+                  </div>
+                  <p className="text-xs text-muted-foreground">清空字段保存即删除对应配置。</p>
+                </div>
+              )}
             </div>
 
             <div className="space-y-1.5">

@@ -52,13 +52,20 @@ function routePriority(r: RoutableLike): number {
   return Number.isFinite(v) ? v : 0
 }
 
+/** metadata 里的 token 名集合：支持 string[]（数组）与逗号分隔字符串（API/UI 友好，兼容中英文逗号） */
+function tokenList(v: unknown): string[] {
+  if (Array.isArray(v)) return v.filter((x): x is string => typeof x === 'string').map((s) => s.trim()).filter(Boolean)
+  if (typeof v === 'string') return v.split(/[,，]/).map((s) => s.trim()).filter(Boolean)
+  return []
+}
+
 /** 密钥准入检查：返回 true=放行 */
 export function tokenAllowed(r: RoutableLike, tokenName?: string): boolean {
   const m = (r.metadata ?? {}) as Record<string, unknown>
   // denyTokens 黑名单优先于 allowTokens
-  const deny = Array.isArray(m.denyTokens) ? m.denyTokens.filter((x): x is string => typeof x === 'string') : []
+  const deny = tokenList(m.denyTokens)
   if (tokenName && deny.includes(tokenName)) return false
-  const allow = Array.isArray(m.allowTokens) ? m.allowTokens.filter((x): x is string => typeof x === 'string') : []
+  const allow = tokenList(m.allowTokens)
   if (allow.length === 0) return true // 空 = 不限
   return tokenName ? allow.includes(tokenName) : false
 }

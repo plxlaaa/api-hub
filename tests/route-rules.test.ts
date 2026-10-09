@@ -108,6 +108,24 @@ test('准入：denyTokens 黑名单', () => {
   assert.equal(ok.kind, 'matched')
 })
 
+test('准入：逗号分隔字符串与数组等价（UI/API 友好格式）', () => {
+  // allowTokens 存逗号串（parseMetadata 只收扁平基础类型，UI 走此格式）
+  const asString = resolveRoute([route('gpt-*', { allowTokens: 'vip, pro，内部' })], 'gpt-4o', { tokenName: 'pro' })
+  assert.equal(asString.kind, 'matched')
+  // 与数组格式行为一致
+  const asArray = resolveRoute([route('gpt-*', { allowTokens: ['vip', 'pro', '内部'] })], 'gpt-4o', { tokenName: 'pro' })
+  assert.equal(asArray.kind, 'matched')
+  // 不在名单 → 拒绝
+  const nope = resolveRoute([route('gpt-*', { allowTokens: 'vip, pro' })], 'gpt-4o', { tokenName: '路人' })
+  assert.equal(nope.kind, 'denied')
+  // 中英文逗号混排、多余空格均容忍
+  const messy = resolveRoute([route('gpt-*', { allowTokens: ' vip ，pro' })], 'gpt-4o', { tokenName: 'vip' })
+  assert.equal(messy.kind, 'matched')
+  // denyTokens 逗号串同样生效
+  const denyStr = resolveRoute([route('*', { denyTokens: '滥用者,小号' })], 'anything', { tokenName: '小号' })
+  assert.equal(denyStr.kind, 'denied')
+})
+
 // ---------- 时段窗口 ----------
 
 test('activeHours：解析与越界校验', () => {

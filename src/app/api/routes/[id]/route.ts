@@ -1,8 +1,10 @@
 import { db } from '@/lib/db'
 import { requireAdmin } from '@/lib/auth'
 import { normalizeChannelConfigs, normalizeStrategy } from '@/lib/route-config'
+import { parseMetadata } from '@/lib/metadata'
 import { resolveRequestId, jsonOk, jsonBadRequest, jsonError } from '@/lib/api-response'
 import { invalidateRouteCache } from '@/lib/route-cache'
+import { Prisma } from '@prisma/client'
 
 export const dynamic = 'force-dynamic'
 
@@ -53,6 +55,19 @@ export async function PUT(req: Request, { params }: Params) {
     data.remark = typeof body.remark === 'string' ? body.remark.trim() : null
   }
   if (typeof body.enabled === 'boolean') data.enabled = body.enabled
+
+  // metadata：undefined=不更新；null / 空对象=清空；对象=校验后整体替换（扁平基础类型值）
+  if (body.metadata === null) {
+    data.metadata = Prisma.DbNull
+  } else if (body.metadata !== undefined) {
+    if (typeof body.metadata === 'object' && !Array.isArray(body.metadata) && Object.keys(body.metadata).length === 0) {
+      data.metadata = Prisma.DbNull
+    } else {
+      const m = parseMetadata(body.metadata)
+      if (!m) return jsonBadRequest('metadata 非法：需为扁平对象，值为字符串/数字/布尔（深度≤1，单值≤200字符）', requestId)
+      data.metadata = m
+    }
+  }
 
   await db.modelRoute.update({ where: { id }, data })
   invalidateRouteCache()

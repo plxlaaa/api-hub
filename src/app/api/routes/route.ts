@@ -55,6 +55,7 @@ export async function GET(req: Request) {
         priceOut: r.priceOut,
         enabled: r.enabled,
         remark: r.remark,
+        metadata: (r.metadata ?? null) as Record<string, string | number | boolean> | null,
         createdAt: r.createdAt,
         stats: { total: s.total, ok: s.ok, tokens: s.tokens, lastUsedAt: s.lastUsedAt },
       }

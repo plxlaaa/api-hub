@@ -40,6 +40,8 @@ export interface ModelRoute {
   priceOut: number | null
   enabled: boolean
   remark: string | null
+  /** 扩展配置：priority / allowTokens / denyTokens / maxAttempts 等（token 名集为逗号分隔字符串） */
+  metadata: Record<string, string | number | boolean> | null
   createdAt: string
   stats?: { total: number; ok: number; tokens: number; lastUsedAt: string | null }
 }
