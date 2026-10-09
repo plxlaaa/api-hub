@@ -1,8 +1,8 @@
 'use client'
 
 import { useMemo, useState } from 'react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { FileDown, MessageSquare, RefreshCw, ScrollText, Trash2 } from 'lucide-react'
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { ChevronDown, FileDown, Loader2, MessageSquare, RefreshCw, ScrollText, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
@@ -26,16 +26,26 @@ export function RequestLogsTab() {
   const [modelFilter, setModelFilter] = useState('all')
   const [channelFilter, setChannelFilter] = useState('all')
   const [okFilter, setOkFilter] = useState('all')
-  const qs = new URLSearchParams({ limit: '200' })
-  if (tokenFilter !== 'all') qs.set('tokenName', tokenFilter)
-  if (modelFilter !== 'all') qs.set('model', modelFilter)
-  if (channelFilter !== 'all') qs.set('channelName', channelFilter)
-  if (okFilter !== 'all') qs.set('ok', okFilter)
-  const { data: logs = [], isLoading } = useQuery<RequestLogItem[]>({
+  // 游标分页：首屏 100 条，底部「加载更多」按 nextCursor 续拉（后端已就绪）
+  const PAGE_SIZE = 100
+  const logsQ = useInfiniteQuery({
     queryKey: ['request-logs', tokenFilter, modelFilter, channelFilter, okFilter],
-    queryFn: () => apiList<RequestLogItem>(`/api/request-logs?${qs.toString()}`),
+    queryFn: ({ pageParam }) => {
+      const q = new URLSearchParams({ limit: String(PAGE_SIZE) })
+      if (tokenFilter !== 'all') q.set('tokenName', tokenFilter)
+      if (modelFilter !== 'all') q.set('model', modelFilter)
+      if (channelFilter !== 'all') q.set('channelName', channelFilter)
+      if (okFilter !== 'all') q.set('ok', okFilter)
+      if (pageParam) q.set('cursor', pageParam)
+      return api<{ items: RequestLogItem[]; nextCursor: string | null; hasMore: boolean }>(`/api/request-logs?${q.toString()}`)
+    },
+    initialPageParam: undefined as string | undefined,
+    getNextPageParam: (last) => last.nextCursor ?? undefined,
     refetchInterval: 10000,
   })
+  const logs = useMemo(() => logsQ.data?.pages.flatMap((p) => p.items) ?? [], [logsQ.data])
+  const isLoading = logsQ.isLoading
+  const hasMoreLogs = logsQ.hasNextPage
   // 筛选选项：从全量日志（不筛）里取 distinct 密钥/模型/渠道名
   const { data: allLogs = [] } = useQuery<RequestLogItem[]>({
     queryKey: ['request-logs', 'all'],
@@ -76,7 +86,7 @@ export function RequestLogsTab() {
             <MessageSquare className="h-4 w-4 shrink-0" />
             网关调用日志
             <span className="text-caption font-normal text-muted-foreground">
-              最近 <span className="tabular">{logs.length}</span> 条 · 最多保留 2000 条
+              已加载 <span className="tabular">{logs.length}</span> 条{hasMoreLogs ? ' · 还有更早记录' : ''} · 最多保留 2000 条
             </span>
           </CardTitle>
           <div className="no-scrollbar -mx-1 flex w-full min-w-0 items-center gap-1.5 overflow-x-auto px-1">
@@ -337,6 +347,19 @@ export function RequestLogsTab() {
                   }
                 }}
               />
+              {hasMoreLogs && (
+                <div className="flex justify-center pt-1">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={() => logsQ.fetchNextPage()}
+                    disabled={logsQ.isFetchingNextPage}
+                  >
+                    {logsQ.isFetchingNextPage ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ChevronDown className="h-3.5 w-3.5" />}
+                    加载更多（已显示 {logs.length} 条）
+                  </Button>
+                </div>
+              )}
             </div>
           )}
         </CardContent>
