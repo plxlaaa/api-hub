@@ -332,3 +332,41 @@ test('限速：metadata.rateLimitPerMin 消费语义（缺省/0/非法/取整）
   // 小数向下取整
   assert.equal(rateLimitPerMin({ rateLimitPerMin: 7.9 }), 7)
 })
+
+// ============================================================
+// Token 级模型白名单 metadata（allowedModels）
+// ============================================================
+const { parseModelWhitelist, modelMatches, modelAllowed } = await import('../src/lib/token-limits.ts')
+
+test('白名单：未配置/空值 → 不限制', () => {
+  assert.equal(parseModelWhitelist(undefined), null)
+  assert.equal(parseModelWhitelist(null), null)
+  assert.equal(parseModelWhitelist({}), null)
+  assert.equal(parseModelWhitelist({ allowedModels: '' }), null)
+  assert.equal(parseModelWhitelist({ allowedModels: '  ' }), null)
+  assert.equal(modelAllowed(undefined, 'anything'), true)
+})
+
+test('白名单：逗号/空格混合分隔均可解析', () => {
+  assert.deepEqual(parseModelWhitelist({ allowedModels: 'gpt-4o, claude-* re:^gemini' }), ['gpt-4o', 'claude-*', 're:^gemini'])
+  // 非字符串（数字等）视为未配置，不打挂网关
+  assert.equal(parseModelWhitelist({ allowedModels: 42 }), null)
+})
+
+test('白名单：匹配语义（精确 / 前缀通配 / 全放行 / re: 正则 / 非法正则不炸）', () => {
+  assert.equal(modelMatches('gpt-4o', 'gpt-4o'), true)
+  assert.equal(modelMatches('gpt-4o', 'gpt-4o-mini'), false)
+  assert.equal(modelMatches('gpt-*', 'gpt-4o-mini'), true)
+  assert.equal(modelMatches('gpt-*', 'claude-3'), false)
+  assert.equal(modelMatches('*', 'anything'), true)
+  assert.equal(modelMatches('re:^claude', 'claude-opus-4-8'), true)
+  assert.equal(modelMatches('re:^claude', 'gpt-4o'), false)
+  assert.equal(modelMatches('re:[bad', 'whatever'), false)
+})
+
+test('白名单：modelAllowed 命中任一模式放行，全不命中拒绝', () => {
+  const m = { allowedModels: 'gpt-4o, claude-*' }
+  assert.equal(modelAllowed(m, 'gpt-4o'), true)
+  assert.equal(modelAllowed(m, 'claude-opus-4-8'), true)
+  assert.equal(modelAllowed(m, 'gemini-pro'), false)
+})

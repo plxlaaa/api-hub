@@ -61,10 +61,11 @@ export function TokensTab() {
   const [name, setName] = useState('')
   const [newKey, setNewKey] = useState<string | null>(null)
   const [deleteId, setDeleteId] = useState<string | null>(null)
-  // 配额与限速编辑
+  // 配额 / 限速 / 模型白名单编辑
   const [quotaOpen, setQuotaOpen] = useState<ApiTokenItem | null>(null)
   const [quotaInput, setQuotaInput] = useState('')
   const [rateInput, setRateInput] = useState('')
+  const [modelsInput, setModelsInput] = useState('')
 
   const create = useMutation({
     mutationFn: () => api<{ key: string }>('/api/tokens', { method: 'POST', body: JSON.stringify({ name, quotaLimit: quotaInput.trim() === '' ? null : Number(quotaInput) }) }),
@@ -100,27 +101,40 @@ export function TokensTab() {
     onError: (e) => toast.error(e.message),
   })
 
-  /** 打开配额与限速弹窗：回填现有值（限速空串 = 未配置，走网关缺省 60/分） */
+  /** 打开密钥策略弹窗：回填现有值（限速空 = 未配置走缺省 60/分；白名单空 = 不限模型） */
   const openQuotaDialog = (t: ApiTokenItem) => {
     setQuotaOpen(t)
     setQuotaInput(t.quotaLimit === null ? '' : String(t.quotaLimit))
     const rl = t.metadata?.rateLimitPerMin
     setRateInput(rl === undefined ? '' : String(rl))
+    setModelsInput(typeof t.metadata?.allowedModels === 'string' ? (t.metadata.allowedModels as string) : '')
   }
 
-  /** 组装限速 metadata（单键更新语义：保留 metadata 中其他键，仅增删 rateLimitPerMin）；返回 null = 输入非法 */
-  const buildRateMetadata = (t: ApiTokenItem): { metadata?: Record<string, string | number | boolean> | null } | null => {
-    const rest = Object.fromEntries(Object.entries(t.metadata ?? {}).filter(([k]) => k !== 'rateLimitPerMin'))
-    if (rateInput.trim() === '') {
-      // 未配置限速：原来也没有该键 → 不更新；原来有 → 清掉（剩余为空则整体置 null）
-      return t.metadata?.rateLimitPerMin === undefined ? {} : { metadata: Object.keys(rest).length ? rest : null }
+  /** 组装 metadata（单键更新语义：保留其他键，仅增删 rateLimitPerMin / allowedModels）；返回 null = 输入非法 */
+  const buildTokenMetadata = (t: ApiTokenItem): { metadata?: Record<string, string | number | boolean> | null } | null => {
+    const rest = Object.fromEntries(
+      Object.entries(t.metadata ?? {}).filter(([k]) => k !== 'rateLimitPerMin' && k !== 'allowedModels')
+    )
+    const next: Record<string, string | number | boolean> = { ...rest }
+    if (rateInput.trim() !== '') {
+      const n = Math.floor(Number(rateInput))
+      if (!Number.isFinite(n) || n < 0) {
+        toast.error('限速需为非负整数（0 = 不限速）')
+        return null
+      }
+      next.rateLimitPerMin = n
     }
-    const n = Math.floor(Number(rateInput))
-    if (!Number.isFinite(n) || n < 0) {
-      toast.error('限速需为非负整数（0 = 不限速）')
-      return null
+    if (modelsInput.trim() !== '') {
+      const s = modelsInput.trim()
+      if (s.length > 200) {
+        toast.error('模型白名单过长（上限 200 字符）')
+        return null
+      }
+      next.allowedModels = s
     }
-    return { metadata: { ...rest, rateLimitPerMin: n } }
+    // 全空且原 metadata 只含这两键 → 整体清空；原本就没有 metadata → 不更新
+    if (Object.keys(next).length === 0) return t.metadata ? { metadata: null } : {}
+    return { metadata: next }
   }
 
   const copy = async (text: string, label: string) => {
@@ -307,9 +321,11 @@ export function TokensTab() {
                   switch (key) {
                     case 'name': {
                       const rl = t.metadata?.rateLimitPerMin
+                      const wl = typeof t.metadata?.allowedModels === 'string' ? (t.metadata.allowedModels as string).split(/[,\s]+/).filter(Boolean) : null
                       return (
                         <span className="flex items-center gap-1.5">
                           <span className="font-medium">{t.name}</span>
+                          {wl && <Badge variant="outline" className="px-1.5 py-0 text-micro text-muted-foreground" title={`模型白名单：${t.metadata?.allowedModels}`}>白名单 {wl.length}</Badge>}
                           {rl !== undefined && (
                             <Badge variant="outline" className="px-1.5 py-0 text-micro text-muted-foreground" title="metadata.rateLimitPerMin">
                               {rl === 0 ? '不限速' : `限 ${rl}/分`}
@@ -444,11 +460,11 @@ export function TokensTab() {
         </DialogContent>
       </Dialog>
 
-      {/* 配额与限速编辑 */}
+      {/* 密钥策略（配额 / 限速 / 模型白名单） */}
       <Dialog open={quotaOpen !== null} onOpenChange={(v) => !v && setQuotaOpen(null)}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
-            <DialogTitle>配额与限速 · {quotaOpen?.name}</DialogTitle>
+            <DialogTitle>配额与限制 · {quotaOpen?.name}</DialogTitle>
             <DialogDescription>
               已用 {quotaOpen?.quotaUsed ?? 0} 次。设为 0 次上限相当于立即停用；清零用量不会中断正在进行的调用。
             </DialogDescription>
@@ -468,6 +484,14 @@ export function TokensTab() {
             />
             <p className="text-xs text-muted-foreground">超过阈值的请求返回 429 并附带 Retry-After；仅作用于这一把 Key。</p>
           </div>
+          <div className="space-y-1.5">
+            <Label>模型白名单</Label>
+            <Input
+              placeholder="留空 = 不限，如：gpt-4o, claude-*, re:^gemini"
+              value={modelsInput} onChange={(e) => setModelsInput(e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">逗号分隔；支持尾部 * 通配与 re: 正则（同路由语法）。列表外的模型调用返回 403。</p>
+          </div>
           <DialogFooter className="flex gap-2 sm:justify-between">
             <Button
               variant="outline"
@@ -481,7 +505,7 @@ export function TokensTab() {
                 onClick={() => {
                   if (!quotaOpen) return
                   const limit = quotaInput.trim() === '' ? null : Math.max(0, Math.floor(Number(quotaInput)))
-                  const md = buildRateMetadata(quotaOpen)
+                  const md = buildTokenMetadata(quotaOpen)
                   if (md === null) return
                   saveQuota.mutate({ id: quotaOpen.id, quotaLimit: limit, ...md })
                 }}

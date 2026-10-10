@@ -148,8 +148,8 @@ async function authenticate(key: string) {
   return token && token.enabled ? token : null
 }
 
-/** 单把 Key 限速阈值解析见 token-limits.ts（抽离以便零依赖单测） */
-import { rateLimitPerMin } from '@/lib/token-limits'
+/** 单把 Key 限速/模型白名单解析见 token-limits.ts（抽离以便零依赖单测） */
+import { rateLimitPerMin, modelAllowed } from '@/lib/token-limits'
 export { rateLimitPerMin, DEFAULT_RATE_LIMIT_PER_MIN } from '@/lib/token-limits'
 
 /**
@@ -313,6 +313,16 @@ async function dispatchChatCompletions(
   }
   const requestedModel = typeof body.model === 'string' ? body.model.trim() : ''
   if (!requestedModel) return openAiError('缺少 model 字段', 'invalid_request_error', 400)
+
+  // 3.5 模型白名单（metadata.allowedModels）：放在配额扣减之前，被拒的请求不该吃配额
+  if (!adminOverride && !modelAllowed(token.metadata, requestedModel)) {
+    return openAiError(
+      `模型 ${requestedModel} 不在此密钥的模型白名单内（联系管理员调整 metadata.allowedModels）`,
+      'permission_error',
+      403,
+      { requestId }
+    )
+  }
 
   // 4. 限速 + 配额原子扣减（放在模型解析之后，避免无效请求白吃配额）
   if (!adminOverride) {
@@ -611,9 +621,11 @@ export async function handleListModels(req: Request): Promise<Response> {
   return new Response(
     JSON.stringify({
       object: 'list',
-      // 纯兜底路由 "*" 不进模型列表（客户端无需看见）；前缀通配（如 gpt-*）保留展示
+      // 纯兜底路由 "*" 不进模型列表（客户端无需看见）；前缀通配（如 gpt-*）保留展示。
+      // 密钥配置了模型白名单（metadata.allowedModels）时同步过滤：看得到 = 调得到。
+      // 注：精确白名单（如 gpt-4o）会隐掉通配路由（gpt-*），但调用仍放行——列表只少不多报。
       data: routes
-        .filter((r) => r.displayName !== '*')
+        .filter((r) => r.displayName !== '*' && modelAllowed(token.metadata, r.displayName))
         .map((r) => ({
           id: r.displayName,
           object: 'model',
