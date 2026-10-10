@@ -311,3 +311,24 @@ test('日志：错误对象与深层结构被安全截断', () => {
   // 超过深度上限被截断，不会无限展开
   assert.equal((parsed.deep as Record<string, unknown>).a !== undefined, true)
 })
+// ============================================================
+// Token 级限速 metadata（rateLimitPerMin）
+// ============================================================
+const { rateLimitPerMin } = await import('../src/lib/token-limits.ts')
+
+test('限速：metadata.rateLimitPerMin 消费语义（缺省/0/非法/取整）', () => {
+  // 未配置 → 网关缺省 60
+  assert.equal(rateLimitPerMin(undefined), 60)
+  assert.equal(rateLimitPerMin(null), 60)
+  assert.equal(rateLimitPerMin({}), 60)
+  // 正整数生效
+  assert.equal(rateLimitPerMin({ rateLimitPerMin: 30 }), 30)
+  // 0 = 显式不限速
+  assert.equal(rateLimitPerMin({ rateLimitPerMin: 0 }), 0)
+  // 非法（负数/字符串/NaN）→ 回退缺省 60
+  assert.equal(rateLimitPerMin({ rateLimitPerMin: -5 }), 60)
+  assert.equal(rateLimitPerMin({ rateLimitPerMin: 'abc' }), 60)
+  assert.equal(rateLimitPerMin({ rateLimitPerMin: Number.NaN }), 60)
+  // 小数向下取整
+  assert.equal(rateLimitPerMin({ rateLimitPerMin: 7.9 }), 7)
+})

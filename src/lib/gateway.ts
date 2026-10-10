@@ -15,8 +15,6 @@ const UPSTREAM_TIMEOUT_MS = 300_000 // 长回答 / 长流式给足时间
 const MAX_REQUEST_LOGS = 2000
 /** 请求体大小上限：聊天请求正常在百 KB 级，10MB 足够宽松又能挡住超大 body 打内存 */
 const MAX_BODY_BYTES = 10 * 1024 * 1024
-/** 单把统一 Key 的默认限速（次/分钟）。可在 metadata.rateLimitPerMin 单独覆盖，0 = 不限 */
-const DEFAULT_RATE_LIMIT_PER_MIN = 60
 
 interface UpstreamBody {
   [key: string]: unknown
@@ -150,13 +148,9 @@ async function authenticate(key: string) {
   return token && token.enabled ? token : null
 }
 
-/** 读取单把 Key 的限速阈值（次/分钟）；metadata.rateLimitPerMin，缺省 60，0 或非法 = 不限 */
-function rateLimitPerMin(metadata: unknown): number {
-  const m = (metadata ?? {}) as Record<string, unknown>
-  const v = Number(m.rateLimitPerMin)
-  if (!Number.isFinite(v) || v <= 0) return v === 0 ? 0 : DEFAULT_RATE_LIMIT_PER_MIN
-  return Math.floor(v)
-}
+/** 单把 Key 限速阈值解析见 token-limits.ts（抽离以便零依赖单测） */
+import { rateLimitPerMin } from '@/lib/token-limits'
+export { rateLimitPerMin, DEFAULT_RATE_LIMIT_PER_MIN } from '@/lib/token-limits'
 
 /**
  * 原子扣减配额并占用一次限速额度：一条 updateMany 同时完成「检查未超额」+「计数 +1」。

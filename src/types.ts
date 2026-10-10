@@ -55,6 +55,7 @@ export interface ApiTokenItem {
   quotaUsed: number
   lastUsedAt: string | null
   createdAt: string
+  metadata?: Record<string, string | number | boolean> | null // 扩展配置（如 rateLimitPerMin 单 Key 限速）
   usage?: { calls: number; tokens: number; lastCallAt: string | null }
 }
 

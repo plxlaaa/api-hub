@@ -38,6 +38,7 @@ export async function GET(req: Request) {
         quotaUsed: t.quotaUsed,
         lastUsedAt: t.lastUsedAt,
         createdAt: t.createdAt,
+        metadata: (t.metadata as Record<string, string | number | boolean> | null) ?? null,
         usage: u
           ? { calls: u._count._all, tokens: u._sum.totalTokens ?? 0, lastCallAt: u._max.createdAt }
           : { calls: 0, tokens: 0, lastCallAt: null },

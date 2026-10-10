@@ -16,6 +16,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { Badge } from '@/components/ui/badge'
 import { Switch } from '@/components/ui/switch'
 import { EmptyState, SkeletonRows } from '@/components/feedback'
 import { KeyValue, StatusDot } from '@/components/metrics'
@@ -60,9 +61,10 @@ export function TokensTab() {
   const [name, setName] = useState('')
   const [newKey, setNewKey] = useState<string | null>(null)
   const [deleteId, setDeleteId] = useState<string | null>(null)
-  // 配额编辑
+  // 配额与限速编辑
   const [quotaOpen, setQuotaOpen] = useState<ApiTokenItem | null>(null)
   const [quotaInput, setQuotaInput] = useState('')
+  const [rateInput, setRateInput] = useState('')
 
   const create = useMutation({
     mutationFn: () => api<{ key: string }>('/api/tokens', { method: 'POST', body: JSON.stringify({ name, quotaLimit: quotaInput.trim() === '' ? null : Number(quotaInput) }) }),
@@ -88,15 +90,38 @@ export function TokensTab() {
   })
 
   const saveQuota = useMutation({
-    mutationFn: ({ id, quotaLimit, quotaReset }: { id: string; quotaLimit: number | null; quotaReset?: boolean }) =>
-      api(`/api/tokens/${id}`, { method: 'PUT', body: JSON.stringify({ quotaLimit, quotaReset }) }),
+    mutationFn: ({ id, quotaLimit, quotaReset, metadata }: { id: string; quotaLimit: number | null; quotaReset?: boolean; metadata?: Record<string, string | number | boolean> | null }) =>
+      api(`/api/tokens/${id}`, { method: 'PUT', body: JSON.stringify({ quotaLimit, quotaReset, metadata }) }),
     onSuccess: () => {
-      toast.success('配额已更新')
+      toast.success('已保存')
       setQuotaOpen(null)
       qc.invalidateQueries({ queryKey: ['tokens'] })
     },
     onError: (e) => toast.error(e.message),
   })
+
+  /** 打开配额与限速弹窗：回填现有值（限速空串 = 未配置，走网关缺省 60/分） */
+  const openQuotaDialog = (t: ApiTokenItem) => {
+    setQuotaOpen(t)
+    setQuotaInput(t.quotaLimit === null ? '' : String(t.quotaLimit))
+    const rl = t.metadata?.rateLimitPerMin
+    setRateInput(rl === undefined ? '' : String(rl))
+  }
+
+  /** 组装限速 metadata（单键更新语义：保留 metadata 中其他键，仅增删 rateLimitPerMin）；返回 null = 输入非法 */
+  const buildRateMetadata = (t: ApiTokenItem): { metadata?: Record<string, string | number | boolean> | null } | null => {
+    const rest = Object.fromEntries(Object.entries(t.metadata ?? {}).filter(([k]) => k !== 'rateLimitPerMin'))
+    if (rateInput.trim() === '') {
+      // 未配置限速：原来也没有该键 → 不更新；原来有 → 清掉（剩余为空则整体置 null）
+      return t.metadata?.rateLimitPerMin === undefined ? {} : { metadata: Object.keys(rest).length ? rest : null }
+    }
+    const n = Math.floor(Number(rateInput))
+    if (!Number.isFinite(n) || n < 0) {
+      toast.error('限速需为非负整数（0 = 不限速）')
+      return null
+    }
+    return { metadata: { ...rest, rateLimitPerMin: n } }
+  }
 
   const copy = async (text: string, label: string) => {
     const ok = await copyToClipboard(text)
@@ -256,11 +281,8 @@ export function TokensTab() {
                           size="sm"
                           variant="outline"
                           className="min-h-9"
-                          title="用量配额"
-                          onClick={() => {
-                            setQuotaOpen(t)
-                            setQuotaInput(t.quotaLimit === null ? '' : String(t.quotaLimit))
-                          }}
+                          title="配额与限速"
+                          onClick={() => openQuotaDialog(t)}
                         >
                           <Gauge className="h-3.5 w-3.5" />
                           配额
@@ -283,8 +305,19 @@ export function TokensTab() {
                 renderCell={(item, key) => {
                   const t = item._raw as ApiTokenItem
                   switch (key) {
-                    case 'name':
-                      return <span className="font-medium">{t.name}</span>
+                    case 'name': {
+                      const rl = t.metadata?.rateLimitPerMin
+                      return (
+                        <span className="flex items-center gap-1.5">
+                          <span className="font-medium">{t.name}</span>
+                          {rl !== undefined && (
+                            <Badge variant="outline" className="px-1.5 py-0 text-micro text-muted-foreground" title="metadata.rateLimitPerMin">
+                              {rl === 0 ? '不限速' : `限 ${rl}/分`}
+                            </Badge>
+                          )}
+                        </span>
+                      )
+                    }
                     case 'key':
                       return <code className="mono-id rounded bg-muted px-1.5 py-0.5">{t.key}</code>
                     case 'usage':
@@ -318,11 +351,8 @@ export function TokensTab() {
                             size="icon"
                             variant="ghost"
                             className="h-8 w-8"
-                            title="用量配额"
-                            onClick={() => {
-                              setQuotaOpen(t)
-                              setQuotaInput(t.quotaLimit === null ? '' : String(t.quotaLimit))
-                            }}
+                            title="配额与限速"
+                            onClick={() => openQuotaDialog(t)}
                           >
                             <Gauge className="h-4 w-4" />
                           </Button>
@@ -414,11 +444,11 @@ export function TokensTab() {
         </DialogContent>
       </Dialog>
 
-      {/* 配额编辑 */}
+      {/* 配额与限速编辑 */}
       <Dialog open={quotaOpen !== null} onOpenChange={(v) => !v && setQuotaOpen(null)}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
-            <DialogTitle>用量配额 · {quotaOpen?.name}</DialogTitle>
+            <DialogTitle>配额与限速 · {quotaOpen?.name}</DialogTitle>
             <DialogDescription>
               已用 {quotaOpen?.quotaUsed ?? 0} 次。设为 0 次上限相当于立即停用；清零用量不会中断正在进行的调用。
             </DialogDescription>
@@ -429,6 +459,14 @@ export function TokensTab() {
               type="number" min={0} placeholder="留空 = 不限量"
               value={quotaInput} onChange={(e) => setQuotaInput(e.target.value)}
             />
+          </div>
+          <div className="space-y-1.5">
+            <Label>限速（次/分钟）</Label>
+            <Input
+              type="number" min={0} placeholder="留空 = 缺省 60，0 = 不限速"
+              value={rateInput} onChange={(e) => setRateInput(e.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">超过阈值的请求返回 429 并附带 Retry-After；仅作用于这一把 Key。</p>
           </div>
           <DialogFooter className="flex gap-2 sm:justify-between">
             <Button
@@ -443,7 +481,9 @@ export function TokensTab() {
                 onClick={() => {
                   if (!quotaOpen) return
                   const limit = quotaInput.trim() === '' ? null : Math.max(0, Math.floor(Number(quotaInput)))
-                  saveQuota.mutate({ id: quotaOpen.id, quotaLimit: limit })
+                  const md = buildRateMetadata(quotaOpen)
+                  if (md === null) return
+                  saveQuota.mutate({ id: quotaOpen.id, quotaLimit: limit, ...md })
                 }}
                 disabled={saveQuota.isPending}
               >
