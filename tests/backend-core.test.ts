@@ -370,3 +370,64 @@ test('白名单：modelAllowed 命中任一模式放行，全不命中拒绝', (
   assert.equal(modelAllowed(m, 'claude-opus-4-8'), true)
   assert.equal(modelAllowed(m, 'gemini-pro'), false)
 })
+
+// ============================================================
+// 聚合导入解析（channel-import）
+// ============================================================
+const { parseImportLines, aggregateModelMap, nameFromUrl } = await import('../src/lib/channel-import.ts')
+
+test('聚合导入：竖线完整格式（含可选段）', () => {
+  const r = parseImportLines('克劳德2 | https://a.com/v1 | sk-x | claude-4, claude-3 | anthropic')
+  assert.equal(r.failed.length, 0)
+  assert.equal(r.channels.length, 1)
+  const c = r.channels[0]
+  assert.equal(c.name, '克劳德2')
+  assert.equal(c.baseUrl, 'https://a.com/v1')
+  assert.equal(c.apiFormat, 'anthropic')
+  assert.deepEqual(c.models, ['claude-4', 'claude-3'])
+})
+
+test('聚合导入：两段速记 url,key → 域名自动命名 + openai 默认', () => {
+  const r = parseImportLines('https://api.deepseek.com,sk-yyy')
+  assert.equal(r.failed.length, 0)
+  assert.equal(r.channels[0].name, 'api.deepseek.com')
+  assert.equal(r.channels[0].apiFormat, 'openai')
+  assert.deepEqual(r.channels[0].models, [])
+})
+
+test('聚合导入：空格/制表符分隔速记 + # 注释 + 空行忽略 + 行内去重', () => {
+  const text = [
+    '# 公益站清单',
+    '',
+    'https://a.com\tsk-a',
+    'https://b.com sk-b',
+    'https://a.com,sk-a', // 与第3行同地址同Key → 判重
+  ].join('\n')
+  const r = parseImportLines(text)
+  assert.equal(r.channels.length, 2)
+  assert.equal(r.failed.length, 1)
+  assert.match(r.failed[0].error, /重复/)
+})
+
+test('聚合导入：非法行（缺 key / 非 URL）报行号', () => {
+  const r = parseImportLines('只有名字\nhttps://ok.com,sk-1')
+  assert.equal(r.channels.length, 1)
+  assert.equal(r.channels[0].name, 'ok.com')
+  assert.equal(r.failed.length, 1)
+  assert.equal(r.failed[0].line, 1)
+})
+
+test('聚合导入：nameFromUrl 域名提取与兜底', () => {
+  assert.equal(nameFromUrl('https://www.foo.com/v1'), 'foo.com')
+  assert.equal(nameFromUrl('not a url'), 'not a url'.slice(0, 10))
+})
+
+test('聚合映射：多站同模型合并、顺序去重', () => {
+  const m = aggregateModelMap([
+    { name: 'A站', models: ['gpt-4o', 'claude-3'] },
+    { name: 'B站', models: ['gpt-4o'] },
+    { name: 'A站', models: ['gpt-4o'] }, // 同站重复出现不重复计数
+  ])
+  assert.deepEqual([...(m.get('gpt-4o') ?? [])], ['A站', 'B站'])
+  assert.deepEqual([...(m.get('claude-3') ?? [])], ['A站'])
+})

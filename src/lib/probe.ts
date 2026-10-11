@@ -66,6 +66,36 @@ export interface ProbeResult {
   fixedNote?: string | null
 }
 
+/** 拉取上游 /models 的模型 id 列表（OpenAI 兼容格式 data[].id；复用探测的双 URL 自愈） */
+export async function fetchUpstreamModels(
+  baseUrl: string,
+  apiKey: string,
+  apiFormat?: string
+): Promise<{ ok: boolean; models: string[]; error: string | null }> {
+  const headers = getAdapter(apiFormat).buildHeaders(apiKey)
+  const base = normalizeBaseUrl(baseUrl)
+  const urls = [upstreamUrl(base, 'models')]
+  const alt = altUpstreamUrl(base, 'models')
+  if (alt !== urls[0]) urls.push(alt)
+
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, { headers, signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) })
+      if (!res.ok) continue
+      const body = (await res.json().catch(() => null)) as { data?: Array<{ id?: unknown }> } | null
+      if (!body || !Array.isArray(body.data)) continue
+      const models = body.data
+        .map((m) => (typeof m?.id === 'string' ? m.id.trim() : ''))
+        .filter(Boolean)
+        .slice(0, 100) // 与导入解析同上限，防超大列表写爆字段
+      return { ok: true, models, error: null }
+    } catch {
+      // 试下一个 URL 变体
+    }
+  }
+  return { ok: false, models: [], error: '上游未返回可解析的模型列表' }
+}
+
 /** 探测单个上游：GET /models（轻量，不消耗对话额度）；鉴权头由协议适配器提供 */
 export async function probeUpstream(baseUrl: string, apiKey: string, apiFormat?: string): Promise<ProbeResult> {
   const start = Date.now()

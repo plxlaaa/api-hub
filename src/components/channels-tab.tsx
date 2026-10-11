@@ -2,7 +2,7 @@
 
 import { useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { CloudDownload, ClipboardPaste, FileDown, Loader2, MessageSquare, Pencil, Plus, Store, Trash2, Upload, ZapOff } from 'lucide-react'
+import { CloudDownload, ClipboardPaste, FileDown, Loader2, MessageSquare, Pencil, Plus, Route, Store, Trash2, Upload, ZapOff } from 'lucide-react'
 import { toast } from 'sonner'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import {
@@ -114,28 +114,55 @@ export function ChannelsTab() {
     onError: (e) => toast.error(e.message),
   })
 
-  // 批量粘贴导入（一行一个渠道，竖线分隔）
+  // 聚合批量导入：粘贴 → 建渠道+并发拉模型 → 聚合报告 → 一键建路由
+  interface BatchReportItem { id: string; name: string; alive: boolean; models: string[]; error: string | null }
   const [batchOpen, setBatchOpen] = useState(false)
   const [batchText, setBatchText] = useState('')
-  const [batchResult, setBatchResult] = useState<{ created: string[]; skipped: Array<{ line: number; name: string; reason: string }>; failed: Array<{ line: number; error: string }> } | null>(null)
+  const [batchResult, setBatchResult] = useState<{ created: string[]; skipped: Array<{ line: number; name: string; reason: string }>; failed: Array<{ line: number; error: string }>; report?: BatchReportItem[] } | null>(null)
   const [batching, setBatching] = useState(false)
+  const [buildingRoutes, setBuildingRoutes] = useState(false)
   const batchImport = async () => {
     setBatching(true)
     setBatchResult(null)
     try {
-      const r = await api<{ created: string[]; skipped: Array<{ line: number; name: string; reason: string }>; failed: Array<{ line: number; error: string }> }>(
+      const r = await api<{ created: string[]; skipped: Array<{ line: number; name: string; reason: string }>; failed: Array<{ line: number; error: string }>; report?: BatchReportItem[] }>(
         '/api/channels/batch',
         { method: 'POST', body: JSON.stringify({ text: batchText }) },
       )
       setBatchResult(r)
       if (r.created.length > 0) {
         qc.invalidateQueries({ queryKey: ['channels'] })
-        toast.success(`导入成功 ${r.created.length} 个渠道`)
+        const alive = r.report?.filter((x) => x.alive).length ?? 0
+        toast.success(`导入 ${r.created.length} 个渠道，${alive} 个站探测存活`)
       }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : '导入失败')
     } finally {
       setBatching(false)
+    }
+  }
+
+  /** 聚合报告 → 一键自动建路由（多站同模型合并进同一路由） */
+  const buildAutoRoutes = async () => {
+    const alive = batchResult?.report?.filter((x) => x.alive) ?? []
+    if (alive.length === 0) return toast.error('无存活渠道可建路由')
+    setBuildingRoutes(true)
+    try {
+      const r = await api<{ created: string[]; merged: Array<{ route: string; added: string[] }>; limited: string[]; limit: number }>(
+        '/api/routes/auto',
+        { method: 'POST', body: JSON.stringify({ channelIds: alive.map((x) => x.id) }) },
+      )
+      qc.invalidateQueries({ queryKey: ['routes'] })
+      const parts = [
+        r.created.length > 0 ? `新建 ${r.created.length} 条` : null,
+        r.merged.length > 0 ? `合并 ${r.merged.length} 条` : null,
+        r.limited.length > 0 ? `超上限跳过 ${r.limited.length} 个` : null,
+      ].filter(Boolean)
+      toast.success(parts.length ? `路由聚合完成：${parts.join('，')}` : '所选渠道的模型均已有路由')
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : '建路由失败')
+    } finally {
+      setBuildingRoutes(false)
     }
   }
 
@@ -679,23 +706,24 @@ export function ChannelsTab() {
         </DialogContent>
       </Dialog>
 
-      {/* 批量粘贴导入 */}
+      {/* 聚合批量导入 */}
       <Dialog open={batchOpen} onOpenChange={(o) => { setBatchOpen(o); if (!o) { setBatchResult(null); setBatchText('') } }}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
-            <DialogTitle>批量粘贴导入渠道</DialogTitle>
+            <DialogTitle>聚合批量导入</DialogTitle>
             <DialogDescription>
-              一行一个渠道，竖线 <code className="rounded bg-muted px-1">|</code> 分隔：
+              一行一个公益站，导入后自动探测并拉取各站模型列表：
               <code className="mt-1 block rounded bg-muted px-2 py-1 text-[11px] leading-relaxed">
-                名称 | baseUrl | apiKey | 模型列表(逗号分隔,可选) | anthropic(可选)
+                名称 | baseUrl | apiKey | 模型(可选) | anthropic(可选)
               </code>
-              模型可后续用「拉取模型」补全；同名渠道自动跳过。
+              <code className="mt-1 block rounded bg-muted px-2 py-1 text-[11px]">https://api.example.com/v1,sk-xxx</code>
+              速记格式自动用域名命名；同名渠道自动跳过；确认后可一键聚合建路由。
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
             <Textarea
               rows={7}
-              placeholder={'克劳德2 | https://api.example.com/v1 | sk-xxx | claude-sonnet-4, claude-opus-4 | anthropic\nDeepSeek | https://api.deepseek.com | sk-yyy | deepseek-chat'}
+              placeholder={'克劳德2 | https://api.example.com/v1 | sk-xxx | claude-sonnet-4, claude-opus-4 | anthropic\nhttps://api.deepseek.com,sk-yyy'}
               value={batchText}
               onChange={(e) => setBatchText(e.target.value)}
               className="font-mono text-xs"
@@ -715,15 +743,44 @@ export function ChannelsTab() {
                 {batchResult.failed.map((f) => (
                   <p key={f.line} className="text-red-500">第 {f.line} 行：{f.error}</p>
                 ))}
+                {batchResult.report && batchResult.report.length > 0 && (
+                  <div className="mt-2 space-y-2 border-t pt-2">
+                    <p className="font-medium text-muted-foreground">聚合报告（存活 {batchResult.report.filter((x) => x.alive).length}/{batchResult.report.length}）</p>
+                    {batchResult.report.map((r) => (
+                      <div key={r.id} className="flex items-start gap-1.5">
+                        <span className={r.alive ? 'text-emerald-600' : 'text-red-500'}>{r.alive ? '●' : '○'}</span>
+                        <div className="min-w-0 flex-1">
+                          <span className="font-medium">{r.name}</span>
+                          {r.models.length > 0 ? (
+                            <span className="ml-1.5 text-muted-foreground">{r.models.length} 个模型：{r.models.slice(0, 6).join(', ')}{r.models.length > 6 ? ' …' : ''}</span>
+                          ) : (
+                            <span className="ml-1.5 text-red-400">{r.error ?? '无模型列表'}</span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             )}
           </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setBatchOpen(false)}>关闭</Button>
-            <Button onClick={batchImport} disabled={batching || !batchText.trim()}>
-              {batching ? <Loader2 className="h-4 w-4 animate-spin" /> : <ClipboardPaste className="h-4 w-4" />}
-              导入
+          <DialogFooter className="flex gap-2 sm:justify-between">
+            <Button
+              variant="outline"
+              onClick={buildAutoRoutes}
+              disabled={buildingRoutes || !batchResult?.report?.some((x) => x.alive)}
+              title="为存活渠道的模型自动建路由；多站同模型合并进同一路由（负载均衡+故障转移）"
+            >
+              {buildingRoutes ? <Loader2 className="h-4 w-4 animate-spin" /> : <Route className="h-4 w-4" />}
+              一键建路由
             </Button>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={() => setBatchOpen(false)}>关闭</Button>
+              <Button onClick={batchImport} disabled={batching || !batchText.trim()}>
+                {batching ? <Loader2 className="h-4 w-4 animate-spin" /> : <ClipboardPaste className="h-4 w-4" />}
+                导入
+              </Button>
+            </div>
           </DialogFooter>
         </DialogContent>
       </Dialog>
