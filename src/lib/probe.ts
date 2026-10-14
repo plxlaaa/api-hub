@@ -263,15 +263,18 @@ export async function probeAllChannels(): Promise<void> {
       }
     })
     await Promise.all(workers)
-    const count = await db.probeLog.count()
-    if (count > MAX_LOGS) {
-      const stale = await db.probeLog.findMany({
-        orderBy: { createdAt: 'desc' },
-        skip: MAX_LOGS,
-        take: count - MAX_LOGS,
-        select: { id: true },
-      })
-      await db.probeLog.deleteMany({ where: { id: { in: stale.map((l) => l.id) } } })
+    // 日志裁剪与 gateway.pruneRequestLogs 同款 2 查询边界删除：
+    // 旧写法 count() + findMany(skip) + deleteMany(IN 千级 id 列表)，
+    // skip 在 SQLite 上要真实扫过丢弃前 N 行，IN 列表 SQL 文本巨大。
+    // 现取「倒数第 MAX_LOGS 条」的时间戳做分界，一条 deleteMany 按 createdAt 删。
+    const boundary = await db.probeLog.findFirst({
+      orderBy: { createdAt: 'desc' },
+      skip: MAX_LOGS,
+      select: { createdAt: true },
+    })
+    if (boundary) {
+      const { count } = await db.probeLog.deleteMany({ where: { createdAt: { lt: boundary.createdAt } } })
+      if (count > 0) log.debug('探测日志已裁剪', { deleted: count, keep: MAX_LOGS })
     }
   } catch (err) {
     log.error('批量探测失败', { error: err })

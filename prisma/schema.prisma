@@ -19,25 +19,25 @@ model Setting {
 
 // 渠道：上游公益站 API（OpenAI 兼容）
 model Channel {
-  id          String     @id @default(cuid())
-  name        String
-  baseUrl     String // 上游地址，填到域名或 /v1 均可
-  apiKey      String
-  apiFormat   String     @default("openai") // openai | anthropic（Claude 原生 /v1/messages）
-  models      String     @default("[]") // 上游支持的模型名，JSON 字符串数组
-  enabled     Boolean    @default(true)
-  autoDisabled Boolean   @default(false) // 熔断器自动摘除（区别于手动 enabled=false）
-  failStreak  Int        @default(0) // 探测连续失败次数
+  id             String     @id @default(cuid())
+  name           String
+  baseUrl        String // 上游地址，填到域名或 /v1 均可
+  apiKey         String
+  apiFormat      String     @default("openai") // openai | anthropic（Claude 原生 /v1/messages）
+  models         String     @default("[]") // 上游支持的模型名，JSON 字符串数组
+  enabled        Boolean    @default(true)
+  autoDisabled   Boolean    @default(false) // 熔断器自动摘除（区别于手动 enabled=false）
+  failStreak     Int        @default(0) // 探测连续失败次数
   autoDisabledAt DateTime?
-  status      String     @default("unknown") // online | offline | unknown
-  latencyMs   Int?
-  lastCheckAt DateTime?
-  lastError   String?
-  remark      String?
-  metadata    Json? // 扩展配置空间（分组/标签/自定义参数），不改 schema 即可挂新属性
-  createdAt   DateTime   @default(now())
-  updatedAt   DateTime   @updatedAt
-  probeLogs   ProbeLog[]
+  status         String     @default("unknown") // online | offline | unknown
+  latencyMs      Int?
+  lastCheckAt    DateTime?
+  lastError      String?
+  remark         String?
+  metadata       Json? // 扩展配置空间（分组/标签/自定义参数），不改 schema 即可挂新属性
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  probeLogs      ProbeLog[]
 }
 
 // 模型路由：对外模型显示名 -> 上游真实模型名 + 渠道配置（每渠道可独立模型名/权重）
@@ -96,7 +96,7 @@ model RequestLog {
   statusCode  Int?
   latencyMs   Int?
   totalTokens Int?
-  tokenName   String?  // 发起请求的统一密钥名（管理员测试为空）
+  tokenName   String? // 发起请求的统一密钥名（管理员测试为空）
   stream      Boolean  @default(false)
   attempt     Int      @default(1) // 第几次渠道尝试（故障转移时 2/3…）
   error       String?
