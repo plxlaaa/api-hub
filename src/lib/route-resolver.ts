@@ -18,8 +18,46 @@
 /** 路由解析所需的最小路由形状（ModelRoute / 预览 DTO 均可） */
 export interface RoutableLike {
   displayName: string
+  targetModel?: string
   metadata?: unknown
   createdAt?: Date
+}
+
+/**
+ * 请求模型名归一化 —— 剥离 Claude Code 的上下文窗口标记后缀。
+ *
+ * Claude Code 请求 1M 上下文时会发 `claude-sonnet-4-5[1m]` 这类带 `[1m]`/`[200k]`
+ * 尾标的模型名（学习自 cc-switch 的 strip_one_m_suffix）；上游通常不认这个尾标，
+ * 网关在「路由匹配 + 转发」两处都应使用剥离后的裸模型名，尾标仅留日志观测。
+ */
+export interface NormalizedModel {
+  /** 剥离上下文标记后的模型名（无标记时与原始一致） */
+  model: string
+  /** 被剥离的上下文标记（如 "1m"），无则为 null */
+  contextTag: string | null
+}
+
+const CONTEXT_TAG_RE = /\s*\[(\d+[kKmM])\]$/
+
+export function normalizeRequestedModel(raw: string): NormalizedModel {
+  const m = raw.match(CONTEXT_TAG_RE)
+  if (!m) return { model: raw, contextTag: null }
+  return { model: raw.slice(0, m.index).trim(), contextTag: m[1].toLowerCase() }
+}
+
+/** Claude Code 档位别名：纯档位词请求可命中名字里含该档位的路由（如 sonnet → claude-sonnet-4-6） */
+const TIER_ALIASES = ['haiku', 'sonnet', 'opus', 'fable', 'subagent'] as const
+
+export function tierAliasOf(model: string): string | null {
+  const lower = model.toLowerCase()
+  return (TIER_ALIASES as readonly string[]).includes(lower) ? lower : null
+}
+
+/** 档位词是否命中某条路由（targetModel 或 displayName 含该档位词） */
+function tierMatches(route: RoutableLike, tier: string): boolean {
+  const t = (route.targetModel ?? '').toLowerCase()
+  const d = route.displayName.toLowerCase()
+  return t.includes(tier) || d.includes(tier)
 }
 
 export interface RouteMatchContext {
@@ -35,6 +73,7 @@ export type RouteResolution<T extends RoutableLike> =
 const SPEC_EXACT = 1_000_000
 const SPEC_REGEX = 500_000
 const SPEC_PREFIX = 300_000
+const SPEC_TIER = 200_000 // 档位别名（sonnet 等纯档位词请求）：低于前缀通配，不抢正常路由
 
 /** 正则模式长度上限：防手滑写出超大模式拖慢热路径（管理台自用，无 ReDoS 攻击面） */
 const MAX_REGEX_LEN = 100
@@ -73,12 +112,18 @@ export function tokenAllowed(r: RoutableLike, tokenName?: string): boolean {
 /**
  * 把一组路由解析为唯一命中。
  * 纯函数（除 Date.now 排序稳定化外无 IO），可直接单测。
+ *
+ * 请求模型名先经 normalizeRequestedModel 剥离 `[1m]`/`[200k]` 上下文标记再参与
+ * 全部匹配（精确/正则/前缀/兜底）；若剥完是纯档位词（sonnet/haiku/opus/fable/
+ * subagent）且常规层无命中，则追加档位别名层 —— targetModel 或 displayName 含
+ * 该档位词的路由以次高特异性命中（低于前缀通配，不抢正常路由）。
  */
 export function resolveRoute<T extends RoutableLike>(
   routes: T[],
-  requestedModel: string,
+  rawRequestedModel: string,
   ctx: RouteMatchContext = {}
 ): RouteResolution<T> {
+  const { model: requestedModel } = normalizeRequestedModel(rawRequestedModel)
   const scored: Scored<T>[] = []
 
   for (const r of routes) {
@@ -122,6 +167,15 @@ export function resolveRoute<T extends RoutableLike>(
     }
   }
 
+  // 档位别名层：常规层零命中且请求名恰为纯档位词时，含该档位的路由以次高特异性兜住
+  const tier = tierAliasOf(requestedModel)
+  if (scored.length === 0 && tier) {
+    for (const r of routes) {
+      if (r.displayName === '*' || !tierMatches(r, tier)) continue
+      scored.push({ route: r, spec: SPEC_TIER, priority: routePriority(r), createdAtMs: r.createdAt?.getTime() ?? 0 })
+    }
+  }
+
   if (scored.length === 0) {
     return { kind: 'none', reason: `模型 "${requestedModel}" 不存在或未启用（可配置 "gpt-*" 前缀通配、"re:xxx" 正则或 "*" 兜底路由承接）` }
   }
@@ -148,6 +202,9 @@ function matchReason(route: RoutableLike, requestedModel: string): string {
   if (name === requestedModel) return '精确匹配'
   if (name === '*') return '兜底路由'
   if (name.startsWith('re:')) return `正则 /${name.slice(3)}/i`
+  if (name.endsWith('*') && requestedModel.startsWith(name.slice(0, -1))) return `前缀 "${name.slice(0, -1)}*"`
+  const tier = tierAliasOf(requestedModel)
+  if (tier && tierMatches(route, tier)) return `档位别名 "${tier}" → ${route.targetModel || name}`
   return `前缀 "${name.slice(0, -1)}*"`
 }
 

@@ -10,7 +10,7 @@ export interface ChannelConfig {
   activeHours?: string // 时段窗口 "HH:MM-HH:MM"（支持跨午夜，如 "22:00-06:00"）；窗口外渠道退为后备
 }
 
-export type RouteStrategy = 'priority' | 'weighted' | 'speed' | 'quality' | 'stability' | 'cost' | 'sticky' | 'percent'
+export type RouteStrategy = 'priority' | 'weighted' | 'speed' | 'quality' | 'stability' | 'cost' | 'smart' | 'sticky' | 'percent'
 
 export const STRATEGY_LABELS: Record<RouteStrategy, string> = {
   priority: '优先级',
@@ -19,6 +19,7 @@ export const STRATEGY_LABELS: Record<RouteStrategy, string> = {
   quality: '智商优先',
   stability: '稳定优先',
   cost: '成本优先',
+  smart: '性价比（价格×延迟）',
   sticky: '会话粘性',
   percent: '百分比分流',
 }

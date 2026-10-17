@@ -137,6 +137,23 @@ test('upsert 双分支（Channel 表）', async () => {
   assert.equal(again.enabled, true, '第二次走 update')
 })
 
+test('update/updateMany 支持 Prisma 风格 { increment: n } 原子自增（failStreak/quotaUsed 依赖）', async () => {
+  const ch = await db.channel.create({ data: { name: '自增渠道', latencyMs: 2 } })
+  const u = await db.channel.update({ where: { id: ch.id }, data: { latencyMs: { increment: 1 } } })
+  assert.equal(u.latencyMs, 3, 'update 原子自增')
+  const u2 = await db.channel.update({ where: { id: ch.id }, data: { latencyMs: { increment: -3 } } })
+  assert.equal(u2.latencyMs, 0, '负增量归零')
+  const m = await db.channel.updateMany({ where: { name: '自增渠道' }, data: { latencyMs: { increment: 5 } } })
+  assert.deepEqual(m, { count: 1 }, 'updateMany 返回 count')
+  const final = await db.channel.findUnique({ where: { id: ch.id } })
+  assert.equal(final.latencyMs, 5, 'updateMany 原子自增')
+  // 混合：increment 字段与普通字段同 data
+  const mix = await db.channel.update({ where: { id: ch.id }, data: { latencyMs: { increment: 1 }, name: '自增改名' } })
+  assert.equal(mix.latencyMs, 6)
+  assert.equal(mix.name, '自增改名')
+  await db.channel.delete({ where: { id: ch.id } })
+})
+
 test('update/delete 缺行抛 P2025 形态错误；deleteMany 返回 count', async () => {
   await assert.rejects(
     () => db.channel.update({ where: { id: 'no-such-id' }, data: { name: 'x' } }),

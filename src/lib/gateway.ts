@@ -8,7 +8,7 @@ import { redactSecrets } from '@/lib/redact'
 import { hitRateLimit } from '@/lib/rate-limit'
 import { log, withRequestId } from '@/lib/logger'
 import { resolveRequestId, openAiError } from '@/lib/api-response'
-import { resolveRoute, shouldTripBreaker } from '@/lib/route-resolver'
+import { resolveRoute, shouldTripBreaker, normalizeRequestedModel } from '@/lib/route-resolver'
 import { getEnabledRoutes, invalidateRouteCache, logCacheHitOnce } from '@/lib/route-cache'
 
 const UPSTREAM_TIMEOUT_MS = 300_000 // 长回答 / 长流式给足时间
@@ -58,16 +58,40 @@ async function recordForwardFailure(channelId: string, errorMsg: string, trip = 
         failStreak: updated.failStreak,
         threshold,
       })
+    } else if (updated.autoDisabled) {
+      // 半开试探失败：刷新冷却起点，下一轮试探再等满冷却期（学习自 cc-switch 熔断器 HalfOpen→Open 语义）
+      await db.channel
+        .updateMany({
+          where: { id: channelId, autoDisabled: true },
+          data: { autoDisabledAt: new Date() },
+        })
+        .catch(() => {})
+      clearProbing(channelId)
     }
   } catch {
     /* 熔断联动失败不影响转发主流程 */
   }
 }
 
-/** 转发成功：清零失败计数（熔断中的渠道不会被选中，恢复仍由探测驱动） */
+/**
+ * 半开熔断（学习自 cc-switch 的 HalfOpen）：被自动摘除的渠道在冷却期满后，
+ * 由真实流量放行单个试探请求 —— 成功即恢复（不等探测周期），失败则刷新冷却继续等待。
+ * 实现独立在 lib/half-open.ts（纯模块，单测直连）；此处只做转发循环的占位联动。
+ */
+import { halfOpenEligible, markProbing, clearProbing } from '@/lib/half-open'
+
+/** 转发成功：清零失败计数；半开试探成功则同步恢复渠道（真实流量驱动，不等探测周期） */
 async function recordForwardSuccess(channelId: string): Promise<void> {
   try {
     await db.channel.updateMany({ where: { id: channelId, failStreak: { not: 0 } }, data: { failStreak: 0 } })
+    const restored = await db.channel.updateMany({
+      where: { id: channelId, autoDisabled: true },
+      data: { autoDisabled: false, failStreak: 0 },
+    })
+    if (restored.count > 0) {
+      clearProbing(channelId)
+      log.info('半开试探成功，渠道已恢复', { channelId })
+    }
   } catch {
     /* 忽略 */
   }
@@ -311,8 +335,11 @@ async function dispatchChatCompletions(
   } catch {
     return openAiError('请求体不是合法 JSON', 'invalid_request_error', 400)
   }
-  const requestedModel = typeof body.model === 'string' ? body.model.trim() : ''
+  const rawModel = typeof body.model === 'string' ? body.model.trim() : ''
+  // 模型名归一化：剥离 Claude Code 的 [1m]/[200k] 上下文尾标（上游不认），原始名留日志观测
+  const { model: requestedModel, contextTag } = normalizeRequestedModel(rawModel)
   if (!requestedModel) return openAiError('缺少 model 字段', 'invalid_request_error', 400)
+  if (contextTag) log.info('已剥离上下文窗口标记', { rawModel, model: requestedModel, contextTag })
 
   // 3.5 模型白名单（metadata.allowedModels）：放在配额扣减之前，被拒的请求不该吃配额
   if (!adminOverride && !modelAllowed(token.metadata, requestedModel)) {
@@ -367,28 +394,47 @@ async function dispatchChatCompletions(
     log.info('路由命中', { requested: requestedModel, route: route.displayName, via: resolved.reason })
   }
 
-  // 6. 渠道配置解析（渠道级模型映射 + 权重）；熔断中的渠道自动跳过
+  // 6. 渠道配置解析（渠道级模型映射 + 权重）；熔断中的渠道自动跳过。
+  //    半开例外：被摘除渠道冷却期满后由真实流量试探（halfOpenEligible），
+  //    试探渠道排在常规排序结果之后 —— 恢复验证不与主流量抢渠道位。
   const cfgs = parseChannelConfigs(route)
   if (cfgs.length === 0) {
     return openAiError(`模型 "${requestedModel}" 未配置渠道`, 'api_error', 502)
   }
-  const channels = await db.channel.findMany({
-    where: { id: { in: cfgs.map((c) => c.id) }, enabled: true, autoDisabled: false },
+  const allChannels = await db.channel.findMany({
+    where: { id: { in: cfgs.map((c) => c.id) }, enabled: true },
   })
-  const byId = new Map(channels.map((c) => [c.id, c]))
-  const candidates = cfgs
-    .map((cfg) => ({ cfg, ch: byId.get(cfg.id) }))
-    .filter((x): x is { cfg: ChannelConfig; ch: NonNullable<typeof x.ch> } => Boolean(x.ch))
+  const byId = new Map(allChannels.map((c) => [c.id, c]))
+  const active: { cfg: ChannelConfig; ch: NonNullable<ReturnType<typeof byId.get>> }[] = []
+  const halfOpen: { cfg: ChannelConfig; ch: NonNullable<ReturnType<typeof byId.get>> }[] = []
+  for (const cfg of cfgs) {
+    const ch = byId.get(cfg.id)
+    if (!ch) continue
+    if (ch.autoDisabled) {
+      if (halfOpenEligible(ch)) halfOpen.push({ cfg, ch })
+    } else {
+      active.push({ cfg, ch })
+    }
+  }
+  const candidates = active
 
-  if (candidates.length === 0) {
+  if (candidates.length === 0 && halfOpen.length === 0) {
     return openAiError(`模型 "${requestedModel}" 没有可用渠道（均已禁用或熔断中）`, 'api_error', 502)
   }
 
-  // 负载均衡策略：按策略生成尝试顺序（与预览 API 共用同一实现）
-  const { ordered } = await orderCandidates(candidates, route.strategy as RouteStrategy, {
-    tokenKey: token.id || undefined,
-    model: requestedModel,
-  })
+  // 负载均衡策略：按策略生成尝试顺序（与预览 API 共用同一实现）；smart 策略读路由 metadata
+  let ordered = candidates.length
+    ? await orderCandidates(candidates, route.strategy as RouteStrategy, {
+        tokenKey: token.id || undefined,
+        model: requestedModel,
+        routeMeta: routeMeta as Record<string, unknown>,
+      }).then((r) => r.ordered)
+    : []
+  for (const h of halfOpen) {
+    markProbing(h.ch.id)
+    ordered.push(h)
+    log.info('渠道熔断冷却期满，放行半开试探请求', { channel: h.ch.name, channelId: h.ch.id })
+  }
 
   // 7. 逐渠道转发（故障转移；每个渠道用自己映射的模型名）
   const isStream = Boolean(body.stream)

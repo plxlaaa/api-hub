@@ -18,6 +18,7 @@ export const STRATEGY_META: Record<RouteStrategy, { label: string; desc: string 
   quality: { label: '智商优先', desc: '优先用智商分高的渠道模型（在下方手动标注 1-10 分），失败切换' },
   stability: { label: '稳定优先', desc: '按近 7 天真实调用成功率排序（来自调用日志），失败切换' },
   cost: { label: '成本优先', desc: '按渠道标注价格升序（渠道 metadata 里配 priceIn/priceOut），失败切换' },
+  smart: { label: '性价比', desc: '价格与延迟合成评分：¥/百万tok + 延迟×汇率（路由 metadata.smartWaitSeconds 调汇率，缺省 10），指标全者优先' },
   sticky: { label: '会话粘性', desc: '同一密钥+模型稳定粘住同一渠道（上游缓存友好），渠道挂掉自动漂移' },
   percent: { label: '百分比分流', desc: '按各渠道流量占比（%）灰度切流；占比 0 的渠道只当后备永不接流' },
 }

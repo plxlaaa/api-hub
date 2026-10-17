@@ -27,7 +27,7 @@ export interface RouteChannelConfig {
   activeHours?: string // 时段窗口 "HH:MM-HH:MM"，窗口外渠道退为后备
 }
 
-export type RouteStrategy = 'priority' | 'weighted' | 'speed' | 'quality' | 'stability' | 'cost' | 'sticky' | 'percent'
+export type RouteStrategy = 'priority' | 'weighted' | 'speed' | 'quality' | 'stability' | 'cost' | 'smart' | 'sticky' | 'percent'
 
 export interface ModelRoute {
   id: string

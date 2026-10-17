@@ -79,7 +79,7 @@ function messagesToOpenAI(messages: Array<{ role?: string; content?: unknown }>)
       continue
     }
     const blocks = m.content as AnthropicContentBlock[]
-    const textParts = blocks.filter((b) => b?.type === 'text')
+    const textParts = blocks.filter((b): b is Extract<AnthropicContentBlock, { type: 'text' }> => b?.type === 'text')
     const toolUses = blocks.filter((b): b is ToolUseBlock => b?.type === 'tool_use')
     const toolResults = blocks.filter((b) => b?.type === 'tool_result')
     // assistant：文本 + tool_calls 可共存于一条 OpenAI 消息
@@ -164,7 +164,8 @@ interface OpenAIResponse {
   id?: string
   model?: string
   choices?: Array<{
-    message?: { role?: string; content?: unknown; tool_calls?: Array<{ id?: string; function?: { name?: string; arguments?: string } }> }
+    index?: number
+    message?: { role?: string; content?: unknown; tool_calls?: Array<{ id?: string; type?: string; function?: { name?: string; arguments?: string } }> }
     finish_reason?: string | null
   }>
   usage?: { prompt_tokens?: number; completion_tokens?: number }
@@ -178,7 +179,18 @@ function toStopReason(finish: string | null | undefined, hasToolCalls: boolean):
 }
 
 /** OpenAI chat.completion 响应 → Anthropic messages 响应 */
-export function openAIToAnthropicResponse(o: OpenAIResponse, requestedModel: string): Record<string, unknown> {
+export interface AnthropicMessageResponse {
+  id: string
+  type: 'message'
+  role: 'assistant'
+  model: string
+  content: Array<Record<string, unknown>>
+  stop_reason: string
+  stop_sequence: string | null
+  usage: { input_tokens: number; output_tokens: number }
+}
+
+export function openAIToAnthropicResponse(o: OpenAIResponse, requestedModel: string): AnthropicMessageResponse {
   const choice = o.choices?.[0]
   const msg = choice?.message ?? {}
   const content: Array<Record<string, unknown>> = []

@@ -221,6 +221,19 @@ function quoteCol(field: string): string {
   return `"${field}"`
 }
 
+/**
+ * Prisma 风格的原子自增 `{ increment: n }` → 生成 `col = COALESCE(col, 0) + n` SQL 片段。
+ * 返回 null 表示不是 increment 形状（走普通参数绑定）。
+ * 动机：gateway 的 failStreak/quotaUsed 与 probe 的 failStreak 都用 increment 语义
+ * （原子自增防并发覆盖），驱动层不识别会把对象当值写库直接炸。
+ */
+function incrementOf(v: unknown): string | null {
+  if (v === null || typeof v !== 'object' || Array.isArray(v) || v instanceof Date) return null
+  const inc = (v as { increment?: unknown }).increment
+  if (typeof inc !== 'number' || !Number.isFinite(inc)) return null
+  return String(inc)
+}
+
 /** 单字段的操作符条件 */
 function fieldCondition(table: string, field: string, cond: unknown, params: unknown[]): string {
   const col = quoteCol(field)
@@ -558,6 +571,11 @@ function project(row: Record<string, unknown>, select?: Record<string, unknown>)
         for (const [f, v] of Object.entries(data)) {
           if (v === undefined) continue
           mustField(table, f)
+          const inc = incrementOf(v)
+          if (inc != null) {
+            sets.push(`${quoteCol(f)} = COALESCE(${quoteCol(f)}, 0) + ${inc}`)
+            continue
+          }
           sets.push(`${quoteCol(f)} = ?`)
           setParams.push(toSql(table, f, v))
         }
@@ -583,6 +601,11 @@ function project(row: Record<string, unknown>, select?: Record<string, unknown>)
         for (const [f, v] of Object.entries(data)) {
           if (v === undefined) continue
           mustField(table, f)
+          const inc = incrementOf(v)
+          if (inc != null) {
+            sets.push(`${quoteCol(f)} = COALESCE(${quoteCol(f)}, 0) + ${inc}`)
+            continue
+          }
           sets.push(`${quoteCol(f)} = ?`)
           setParams.push(toSql(table, f, v))
         }

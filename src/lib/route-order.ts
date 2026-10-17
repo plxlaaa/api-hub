@@ -12,11 +12,12 @@ export interface OrderContext {
   tokenKey?: string // 稳定标识（token id 或 key），同一调用方粘同一渠道
   model?: string // 请求的模型名，参与哈希（不同模型可落不同渠道）
   rand?: number // 注入随机数（0-1），单测可复现分流结果；缺省 Math.random()
+  routeMeta?: Record<string, unknown> // 路由 metadata（smart 策略读 smartWaitSeconds）
 }
 
-export type RouteStrategy = 'priority' | 'weighted' | 'speed' | 'quality' | 'stability' | 'cost' | 'sticky' | 'percent'
+export type RouteStrategy = 'priority' | 'weighted' | 'speed' | 'quality' | 'stability' | 'cost' | 'smart' | 'sticky' | 'percent'
 
-export const STRATEGIES: RouteStrategy[] = ['priority', 'weighted', 'speed', 'quality', 'stability', 'cost', 'sticky', 'percent']
+export const STRATEGIES: RouteStrategy[] = ['priority', 'weighted', 'speed', 'quality', 'stability', 'cost', 'smart', 'sticky', 'percent']
 
 export const STRATEGY_LABELS: Record<RouteStrategy, string> = {
   priority: '优先级',
@@ -25,6 +26,7 @@ export const STRATEGY_LABELS: Record<RouteStrategy, string> = {
   quality: '质量优先',
   stability: '稳定性优先',
   cost: '成本优先',
+  smart: '性价比（价格×延迟）',
   sticky: '会话粘性',
   percent: '百分比分流',
 }
@@ -207,6 +209,47 @@ const percentStrategy: StrategyFn = (candidates, ctx) => {
   return [primary, ...candidates.filter((c) => c !== primary)]
 }
 
+/**
+ * 性价比（smart）：价格与延迟合成单一评分 —— 学习自 cc-switch-route 的智能排序。
+ *
+ *   score = price + (latencySec × 0.1 / waitSeconds)
+ *
+ * - price：与成本优先同源的加权价 (priceIn + 3×priceOut)/4（美元/百万token）
+ * - waitSeconds：用户愿为「每省 1 美元/百万token」多等多少秒（路由 metadata.smartWaitSeconds，
+ *   缺省 10s）—— 是延迟↔价格的汇率旋钮：调大偏省钱，调小偏求快
+ * - 排序纪律（同 cc-switch）：指标齐全的渠道在前，缺价格或延迟的按缺口数退后，
+ *   双缺垫底 —— 未知不冒充便宜也不冒充快
+ */
+const smartStrategy: StrategyFn = (candidates, ctx) => {
+  const raw = Number(ctx?.routeMeta?.smartWaitSeconds)
+  const waitSec = Number.isFinite(raw) && raw > 0 ? raw : 10
+  // 加权价（与成本优先同源）：输出价 3:1 加权；只标一档时按已知档粗估，全未标 = null
+  const effPrice = (x: Candidate): number | null => {
+    const m = (x.ch.metadata ?? {}) as Record<string, unknown>
+    const pin = typeof m.priceIn === 'number' && m.priceIn >= 0 ? m.priceIn : null
+    const pout = typeof m.priceOut === 'number' && m.priceOut >= 0 ? m.priceOut : null
+    if (pin != null && pout != null) return (pin + 3 * pout) / 4
+    if (pin != null) return pin
+    if (pout != null) return pout
+    return null
+  }
+  const meta = (x: Candidate) => {
+    const p = effPrice(x)
+    const l = x.ch.latencyMs
+    const known = (p != null ? 2 : 0) + (l != null ? 1 : 0)
+    const score = p != null ? p + ((l ?? 0) / 1000) * (0.1 / waitSec) : Number.POSITIVE_INFINITY
+    return { p, l, known, score }
+  }
+  return [...candidates].sort((a, b) => {
+    const ma = meta(a)
+    const mb = meta(b)
+    if (ma.known !== mb.known) return mb.known - ma.known // 指标全的在前
+    if (ma.known === 0) return 0 // 双缺保持配置顺序
+    if (ma.score !== mb.score) return ma.score - mb.score
+    return 0
+  })
+}
+
 const STRATEGY_REGISTRY: Record<RouteStrategy, StrategyFn> = {
   priority: priorityStrategy,
   weighted: weightedStrategy,
@@ -214,6 +257,7 @@ const STRATEGY_REGISTRY: Record<RouteStrategy, StrategyFn> = {
   quality: qualityStrategy,
   stability: stabilityStrategy,
   cost: costStrategy,
+  smart: smartStrategy,
   sticky: stickyStrategy,
   percent: percentStrategy,
 }
@@ -228,6 +272,15 @@ const BASIS_LABEL: Partial<Record<RouteStrategy, (c: Candidate, pos: number) => 
     const m = (c.ch.metadata ?? {}) as Record<string, unknown>
     if (typeof m.priceIn !== 'number' && typeof m.priceOut !== 'number') return '未标注价格 · 排最后'
     return `¥ ${m.priceIn ?? '?'}/${m.priceOut ?? '?'} 每百万tok`
+  },
+  smart: (c) => {
+    const m = (c.ch.metadata ?? {}) as Record<string, unknown>
+    const hasP = typeof m.priceIn === 'number' || typeof m.priceOut === 'number'
+    const l = c.ch.latencyMs
+    if (!hasP && l == null) return '价格/延迟均未知 · 排最后'
+    if (!hasP) return `延迟 ${l}ms · 价格未知`
+    if (l == null) return `¥ ${m.priceIn ?? '?'}/${m.priceOut ?? '?'} · 延迟未知`
+    return `¥ ${m.priceIn ?? '?'}/${m.priceOut ?? '?'} · ${l}ms`
   },
   sticky: (c) => (c.cfg.model ? `会话哈希 · 独立模型 ${c.cfg.model}` : '会话哈希稳定选主'),
   percent: (c) => `流量占比 ${c.cfg.percent ?? 100}%`,

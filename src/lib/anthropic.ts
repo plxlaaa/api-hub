@@ -8,6 +8,9 @@
 export interface OpenAIMessage {
   role: string
   content: unknown
+  /** 完整 OpenAI 形状的扩展字段：入站适配（Anthropic→内部）构造消息时使用；出站侧不读取 */
+  tool_calls?: Array<{ id?: string; type?: string; function?: { name?: string; arguments?: string } }>
+  tool_call_id?: string
 }
 
 export interface OpenAIBody {
