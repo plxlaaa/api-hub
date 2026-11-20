@@ -40,14 +40,35 @@ interface TextBlock { type: 'text'; text: string }
 interface ToolUseBlock { type: 'tool_use'; id: string; name: string; input: unknown }
 type AnthropicContentBlock = TextBlock | ToolUseBlock | { type: string } & Record<string, unknown>
 
-/** 提取块数组中的全部文本块（拼接） */
+/** 提取块数组中的全部文本块（拼接）；image 块以占位保留语义（OpenAI tool 消息不支持图片块） */
 function blocksToText(content: unknown): string {
   if (typeof content === 'string') return content
   if (!Array.isArray(content)) return ''
   return (content as Array<Record<string, unknown>>)
-    .filter((b) => b?.type === 'text')
-    .map((b) => String(b.text ?? ''))
+    .map((b) => {
+      if (b?.type === 'text') return String(b.text ?? '')
+      if (b?.type === 'image') return '[图片]'
+      return ''
+    })
     .join('')
+}
+
+/**
+ * Anthropic image 块 → OpenAI image_url 块。
+ * source.type=base64（media_type+data）→ data URI；source.type=url → 直传。
+ * 非法块返回 null（调用方跳过，宁缺勿错）。
+ */
+function imageBlockToOpenAI(b: Record<string, unknown>): { type: 'image_url'; image_url: { url: string } } | null {
+  const src = b.source as { type?: string; media_type?: string; data?: string; url?: string } | undefined
+  if (!src || typeof src !== 'object') return null
+  if (src.type === 'base64' && typeof src.data === 'string' && src.data.length > 0) {
+    const mt = typeof src.media_type === 'string' && src.media_type.startsWith('image/') ? src.media_type : 'image/png'
+    return { type: 'image_url', image_url: { url: `data:${mt};base64,${src.data}` } }
+  }
+  if (src.type === 'url' && typeof src.url === 'string' && /^https?:\/\//.test(src.url)) {
+    return { type: 'image_url', image_url: { url: src.url } }
+  }
+  return null
 }
 
 /** system 字段（string 或 text 块数组）→ 单个 system 消息 */
@@ -82,6 +103,14 @@ function messagesToOpenAI(messages: Array<{ role?: string; content?: unknown }>)
     const textParts = blocks.filter((b): b is Extract<AnthropicContentBlock, { type: 'text' }> => b?.type === 'text')
     const toolUses = blocks.filter((b): b is ToolUseBlock => b?.type === 'tool_use')
     const toolResults = blocks.filter((b) => b?.type === 'tool_result')
+    // user 侧图片块 → OpenAI image_url（assistant 消息按 Anthropic 规范不会有图片，忽略）
+    const imageParts =
+      role === 'user'
+        ? blocks
+            .filter((b) => b?.type === 'image')
+            .map((b) => imageBlockToOpenAI(b as Record<string, unknown>))
+            .filter((x): x is NonNullable<typeof x> => x !== null)
+        : []
     // assistant：文本 + tool_calls 可共存于一条 OpenAI 消息
     if (toolUses.length > 0) {
       out.push({
@@ -93,8 +122,16 @@ function messagesToOpenAI(messages: Array<{ role?: string; content?: unknown }>)
           function: { name: String(t.name ?? ''), arguments: JSON.stringify(t.input ?? {}) },
         })),
       })
+    } else if (imageParts.length > 0) {
+      // 多模态 content：文本在前图片在后（OpenAI 视觉格式）；纯图片时 content 只含图片块
+      const texts = textParts.map((b) => ({ type: 'text' as const, text: b.text })).filter((p) => p.text.length > 0)
+      out.push({ role, content: [...texts, ...imageParts] })
     } else if (textParts.length > 0) {
       out.push({ role, content: textParts.map((b) => b.text).join('') })
+    } else if (blocks.length > 0) {
+      // 支持的三类块（text/tool_use/tool_result）全空但块数组非空：唯一可能是非法 image 块
+      // —— 占位保消息，不静默吞（丢消息会让上游答非所问）
+      out.push({ role, content: '[图片]' })
     }
     // user 侧的 tool_result：每块一条 role:'tool' 消息（OpenAI 要求与 tool_call_id 一一对应）
     for (const r of toolResults) {

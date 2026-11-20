@@ -277,3 +277,60 @@ test('空错误体兜底为 HTTP 状态描述', async () => {
   assert.equal(j.error.message, '网关错误 HTTP 502')
   assert.equal(j.error.type, 'api_error')
 })
+
+// ---------- 多模态：Anthropic image 块 → OpenAI image_url ----------
+
+test('image base64 → image_url data URI（media_type 映射）', () => {
+  const body = {
+    model: 'claude',
+    max_tokens: 100,
+    messages: [{ role: 'user', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'QUJD' } }] }],
+  }
+  const out = anthropicToOpenAIBody(body as never)
+  const msgs = out.messages as Array<{ role: string; content: unknown }>
+  assert.equal(msgs.length, 1)
+  const parts = msgs[0].content as Array<{ type: string; image_url?: { url: string } }>
+  assert.equal(parts.length, 1)
+  assert.equal(parts[0].type, 'image_url')
+  assert.equal(parts[0].image_url?.url, 'data:image/jpeg;base64,QUJD')
+})
+
+test('image url 源直传 + 文本图片混合（文本在前）', () => {
+  const body = {
+    model: 'claude',
+    max_tokens: 100,
+    messages: [{ role: 'user', content: [{ type: 'text', text: '看这张' }, { type: 'image', source: { type: 'url', url: 'https://x.test/a.png' } }] }],
+  }
+  const out = anthropicToOpenAIBody(body as never)
+  const parts = (out.messages as Array<{ content: Array<{ type: string; text?: string; image_url?: { url: string } }> }>)[0].content
+  assert.equal(parts.length, 2)
+  assert.equal(parts[0].type, 'text')
+  assert.equal(parts[0].text, '看这张')
+  assert.equal(parts[1].type, 'image_url')
+  assert.equal(parts[1].image_url?.url, 'https://x.test/a.png')
+})
+
+test('非法 image 块跳过（缺 source / 非法 url）→ 占位保消息不静默吞', () => {
+  const body = {
+    model: 'claude',
+    max_tokens: 100,
+    messages: [{ role: 'user', content: [{ type: 'image' }, { type: 'image', source: { type: 'url', url: 'ftp://bad' } }] }],
+  }
+  const out = anthropicToOpenAIBody(body as never)
+  const content = (out.messages as Array<{ content: unknown }>)[0].content
+  assert.equal(Array.isArray(content), false, '非法块不产生 image_url 数组')
+  assert.equal(content, '[图片]', '消息保留（占位）而非整条吞掉')
+})
+
+test('tool_result 内 image 块降级为 [图片] 占位（OpenAI tool 消息不支持图片）', () => {
+  const body = {
+    model: 'claude',
+    max_tokens: 100,
+    messages: [
+      { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu_1', content: [{ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'QQ==' } }] }] },
+    ],
+  }
+  const out = anthropicToOpenAIBody(body as never)
+  const toolMsg = (out.messages as Array<{ role: string; content: unknown }>).find((m) => m.role === 'tool')
+  assert.equal(toolMsg?.content, '[图片]')
+})

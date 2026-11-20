@@ -35,7 +35,7 @@ test('stripImages：图片替换为占位、同消息文本保留', () => {
     model: 'claude',
     messages: [{ role: 'user', content: [{ type: 'text', text: '这是什么' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,xx' } }] }],
   }
-  const out = stripImages(body) as { messages: Array<{ content: string }> }
+  const out = stripImages(body) as { messages: Array<{ content: string }>; model: string }
   assert.match(out.messages[0].content, /这是什么/)
   assert.match(out.messages[0].content, /图片已省略/)
   assert.equal(typeof out.messages[0].content, 'string', 'content 退化为纯文本字符串')
