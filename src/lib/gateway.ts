@@ -9,6 +9,7 @@ import { hitRateLimit } from '@/lib/rate-limit'
 import { log, withRequestId } from '@/lib/logger'
 import { resolveRequestId, openAiError } from '@/lib/api-response'
 import { resolveRoute, shouldTripBreaker, normalizeRequestedModel } from '@/lib/route-resolver'
+import { bodyHasImages, isImageRejection, stripImages, type RectifiableBody } from '@/lib/media-rectifier'
 import { getEnabledRoutes, invalidateRouteCache, logCacheHitOnce } from '@/lib/route-cache'
 
 const UPSTREAM_TIMEOUT_MS = 300_000 // 长回答 / 长流式给足时间
@@ -439,6 +440,8 @@ async function dispatchChatCompletions(
   // 7. 逐渠道转发（故障转移；每个渠道用自己映射的模型名）
   const isStream = Boolean(body.stream)
   const failures: string[] = []
+  // 图片降级整流：每请求最多一次（学习 cc-switch per-provider retry flag，防循环）
+  let rectifiedImages = false
 
   for (const [tryIdx, { cfg, ch }] of ordered.entries()) {
     // 故障转移上限：metadata.maxAttempts 限制最多实际尝试的渠道数（省时省日志，防止坏请求烧穿全部渠道）
@@ -516,13 +519,40 @@ async function dispatchChatCompletions(
       // 上游错误体可能回显 Key（如 "Invalid API key: sk-xxx"）或暴露内网地址，
       // 必须脱敏后再进日志与返回体，避免把上游凭据泄漏给任何持有网关 Key 的调用方。
       const raw = await res.text().catch(() => '')
-      const detail = redactSecrets(raw, 200)
-      const msg = `HTTP ${res.status}${detail ? ` ${detail}` : ''}`
-      failures.push(`[${ch.name}] ${msg}`)
-      const latencyMs = Date.now() - start
-      void recordForwardFailure(ch.id, msg, trip)
-      void logRequest({ channelName: ch.name, model: requestedModel, targetModel: modelForChannel, ok: false, statusCode: res.status, latencyMs, tokenName: token.name, stream: isStream, attempt: tryIdx + 1, error: msg })
-      continue
+      // 图片降级整流（学习 cc-switch media retry）：上游 4xx 报「不支持视觉输入」且请求里
+      // 确有图片时，把图片块换成文字占位对同渠道重试一次 —— 换渠道图片同样被拒，先修再转移更省。
+      if (!rectifiedImages && !trip && isImageRejection(res.status, raw) && bodyHasImages(body as RectifiableBody)) {
+        rectifiedImages = true
+        log.info('上游拒绝图片，整流降级后重试同渠道', { channel: ch.name, status: res.status })
+        const strippedBody = adapter.buildRequestBody(stripImages(body as RectifiableBody) as unknown as OpenAIBody, modelForChannel)
+        const rectifiedRes = await fetch(primaryUrl, {
+          method: 'POST',
+          headers: adapter.buildHeaders(ch.apiKey),
+          body: strippedBody,
+          signal: upstreamSignal,
+          cache: 'no-store',
+        }).catch(() => null)
+        if (rectifiedRes?.ok) {
+          log.info('图片降级整流成功', { channel: ch.name })
+          res = rectifiedRes
+        } else {
+          void rectifiedRes?.body?.cancel().catch(() => {})
+          const msg = `HTTP ${res.status}${raw ? ` ${redactSecrets(raw, 200)}` : ''}`
+          failures.push(`[${ch.name}] ${msg}`)
+          const latencyMs = Date.now() - start
+          void recordForwardFailure(ch.id, msg, trip)
+          void logRequest({ channelName: ch.name, model: requestedModel, targetModel: modelForChannel, ok: false, statusCode: res.status, latencyMs, tokenName: token.name, stream: isStream, attempt: tryIdx + 1, error: msg })
+          continue
+        }
+      } else {
+        const detail = redactSecrets(raw, 200)
+        const msg = `HTTP ${res.status}${detail ? ` ${detail}` : ''}`
+        failures.push(`[${ch.name}] ${msg}`)
+        const latencyMs = Date.now() - start
+        void recordForwardFailure(ch.id, msg, trip)
+        void logRequest({ channelName: ch.name, model: requestedModel, targetModel: modelForChannel, ok: false, statusCode: res.status, latencyMs, tokenName: token.name, stream: isStream, attempt: tryIdx + 1, error: msg })
+        continue
+      }
     }
 
     // 成功 → 透传（非 openai 协议：适配器转换响应；流式经适配器 SSE 转换器）
