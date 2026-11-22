@@ -49,12 +49,12 @@ export function ChannelsTab() {
     refetchInterval: 8000,
   })
   // 熔断器设置
-  const { data: breaker } = useQuery<{ circuitBreaker: boolean; cbThreshold: number }>({
+  const { data: breaker } = useQuery<{ circuitBreaker: boolean; cbThreshold: number; alertWebhookUrl?: string }>({
     queryKey: ['settings'],
     queryFn: () => api('/api/settings'),
   })
   const saveBreaker = useMutation({
-    mutationFn: (patch: { circuitBreaker?: boolean; cbThreshold?: number }) =>
+    mutationFn: (patch: { circuitBreaker?: boolean; cbThreshold?: number; alertWebhookUrl?: string }) =>
       api('/api/settings', { method: 'PUT', body: JSON.stringify(patch) }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['settings'] }),
     onError: (e) => toast.error(e.message),
@@ -66,6 +66,7 @@ export function ChannelsTab() {
   const [fetchingModels, setFetchingModels] = useState(false)
   const [chatTest, setChatTest] = useState<{ name: string; loading: boolean; result: ChatTestResult | null } | null>(null)
   const [importOpen, setImportOpen] = useState(false)
+  const [testingWebhook, setTestingWebhook] = useState(false)
   const [importText, setImportText] = useState('')
   const [importMode, setImportMode] = useState<'merge' | 'replace'>('merge')
   const fileRef = useRef<HTMLInputElement>(null)
@@ -323,6 +324,37 @@ export function ChannelsTab() {
                 {channels.filter((c) => c.autoDisabled).length} 个渠道熔断中
               </span>
             )}
+          </div>
+
+          {/* 告警 webhook 设置条（学习 one-api 渠道失联通知） */}
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-2 rounded-md border border-dashed px-3 py-2.5">
+            <span className="text-sm font-medium">渠道告警</span>
+            <Input
+              placeholder="渠道熔断/恢复时 POST 通知的 webhook URL（如 Bark/飞书/企业微信），留空关闭"
+              defaultValue={breaker?.alertWebhookUrl ?? ''}
+              key={breaker?.alertWebhookUrl}
+              className="h-8 min-w-0 flex-1 text-xs"
+              onBlur={(e) => {
+                const url = e.target.value.trim()
+                if (url !== (breaker?.alertWebhookUrl ?? '')) saveBreaker.mutate({ alertWebhookUrl: url })
+              }}
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={testingWebhook}
+              onClick={async () => {
+                const url = (document.querySelector('input[placeholder^=\"渠道熔断/恢复\"]') as HTMLInputElement | null)?.value?.trim()
+                if (!url) { toast.error('先填 webhook 地址'); return }
+                setTestingWebhook(true)
+                try {
+                  const r = await api<{ ok: boolean; detail: string }>('/api/settings/test-webhook', { method: 'POST', body: JSON.stringify({ url }) })
+                  r.ok ? toast.success(`测试推送已送达（${r.detail}）`) : toast.error(`送达失败：${r.detail}`)
+                } catch (e) { toast.error(e instanceof Error ? e.message : String(e)) } finally { setTestingWebhook(false) }
+              }}
+            >
+              测试
+            </Button>
           </div>
 
           {/* 渠道列表：桌面表格 / 窄屏卡片 */}

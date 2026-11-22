@@ -10,6 +10,8 @@ import { log, withRequestId } from '@/lib/logger'
 import { resolveRequestId, openAiError } from '@/lib/api-response'
 import { resolveRoute, shouldTripBreaker, normalizeRequestedModel } from '@/lib/route-resolver'
 import { bodyHasImages, isImageRejection, stripImages, type RectifiableBody } from '@/lib/media-rectifier'
+import type { UsageStats } from '@/lib/adapters/types'
+import { estimateCostUsd } from '@/lib/cost'
 import { getEnabledRoutes, invalidateRouteCache, logCacheHitOnce } from '@/lib/route-cache'
 
 const UPSTREAM_TIMEOUT_MS = 300_000 // 长回答 / 长流式给足时间
@@ -91,7 +93,9 @@ async function recordForwardSuccess(channelId: string): Promise<void> {
     })
     if (restored.count > 0) {
       clearProbing(channelId)
+      const ch = await db.channel.findUnique({ where: { id: channelId }, select: { name: true } })
       log.info('半开试探成功，渠道已恢复', { channelId })
+      notifyChannelEvent('channel_recovered', ch?.name ?? channelId, '半开试探成功，渠道已从熔断中恢复')
     }
   } catch {
     /* 忽略 */
@@ -107,6 +111,9 @@ async function logRequest(data: {
   statusCode?: number | null
   latencyMs?: number | null
   totalTokens?: number | null
+  promptTokens?: number | null
+  completionTokens?: number | null
+  costUsd?: number | null
   tokenName?: string | null
   stream?: boolean
   attempt?: number
@@ -122,6 +129,9 @@ async function logRequest(data: {
         statusCode: data.statusCode ?? null,
         latencyMs: data.latencyMs ?? null,
         totalTokens: data.totalTokens ?? null,
+        promptTokens: data.promptTokens ?? null,
+        completionTokens: data.completionTokens ?? null,
+        costUsd: data.costUsd ?? null,
         tokenName: data.tokenName ?? null,
         stream: data.stream ?? false,
         attempt: data.attempt ?? 1,
@@ -175,6 +185,7 @@ async function authenticate(key: string) {
 
 /** 单把 Key 限速/模型白名单解析见 token-limits.ts（抽离以便零依赖单测） */
 import { rateLimitPerMin, modelAllowed } from '@/lib/token-limits'
+import { notifyChannelEvent } from '@/lib/alert-webhook'
 export { rateLimitPerMin, DEFAULT_RATE_LIMIT_PER_MIN } from '@/lib/token-limits'
 
 /**
@@ -559,7 +570,7 @@ async function dispatchChatCompletions(
     // 注意：Next dev 的 fetch 补丁会在 clone() 后锁定 res.body，透传必须避免 clone
     void recordForwardSuccess(ch.id)
     const latencyMs = Date.now() - start // 首字节延迟（TTFB）
-    let totalTokens: number | null = null
+    let usage: UsageStats = { promptTokens: null, completionTokens: null, totalTokens: null }
     let resBody: ReadableStream<Uint8Array> | null = res.body
     let contentType = res.headers.get('content-type') || 'application/json'
     if (isStream && adapter.transformStream) {
@@ -568,7 +579,7 @@ async function dispatchChatCompletions(
     } else if (!isStream) {
       const text = await res.text()
       try {
-        totalTokens = adapter.extractUsage(JSON.parse(text))
+        usage = adapter.extractUsage(JSON.parse(text))
       } catch {
         /* usage 提取失败不影响转发 */
       }
@@ -602,6 +613,8 @@ async function dispatchChatCompletions(
       // 读取抛错或客户端中断时记录失败原因 —— 否则流式失败在日志里完全不可见。
       let seen = 0
       let streamTokens: number | null = null
+      let streamPromptTokens: number | null = null
+      let streamCompletionTokens: number | null = null
       let streamText = ''
       let settled = false
       const reader = resBody.getReader()
@@ -617,21 +630,27 @@ async function dispatchChatCompletions(
                 ok: true,
                 latencyMs: Date.now() - start, // 流式：记录完整耗时而非 TTFB
                 totalTokens: streamTokens,
+                promptTokens: streamPromptTokens,
+                completionTokens: streamCompletionTokens,
+                costUsd: estimateCostUsd(ch.metadata, { promptTokens: streamPromptTokens, completionTokens: streamCompletionTokens }),
                 attempt: tryIdx + 1,
               })
               return
             }
             if (value) {
               seen += value.byteLength
-              // 尝试从 SSE 增量里捞 usage（OpenAI 兼容协议在末帧带 usage）
+              // 尝试从 SSE 增量里捞 usage（OpenAI 末帧/Anthropic message_delta/Gemini usageMetadata）
               if (streamTokens === null && value.byteLength < 64 * 1024) {
                 try {
                   streamText += new TextDecoder().decode(value)
                   const m = streamText.match(/"usage"\s*:\s*\{[^{}]*\}/g)
                   if (m?.length) {
                     const u = JSON.parse(m[m.length - 1].replace(/"usage"\s*:\s*/, ''))
-                    const total = Number(u.total_tokens ?? (Number(u.prompt_tokens ?? 0) + Number(u.completion_tokens ?? 0)))
-                    if (Number.isFinite(total) && total > 0) streamTokens = total
+                    const n = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) && x >= 0 ? x : null)
+                    streamPromptTokens = n(u.prompt_tokens ?? u.input_tokens ?? u.promptTokenCount) ?? streamPromptTokens
+                    streamCompletionTokens = n(u.completion_tokens ?? u.output_tokens ?? u.candidatesTokenCount) ?? streamCompletionTokens
+                    const total = n(u.total_tokens) ?? (streamPromptTokens !== null && streamCompletionTokens !== null ? streamPromptTokens + streamCompletionTokens : null)
+                    if (total !== null && total > 0) streamTokens = total
                   }
                   // 只保留尾部，避免长回答无限增长
                   if (streamText.length > 32 * 1024) streamText = streamText.slice(-8 * 1024)
@@ -669,7 +688,16 @@ async function dispatchChatCompletions(
         },
       })
     } else {
-      void logRequest({ ...logBase, ok: true, latencyMs, totalTokens, attempt: tryIdx + 1 })
+      void logRequest({
+        ...logBase,
+        ok: true,
+        latencyMs,
+        totalTokens: usage.totalTokens,
+        promptTokens: usage.promptTokens,
+        completionTokens: usage.completionTokens,
+        costUsd: estimateCostUsd(ch.metadata, usage),
+        attempt: tryIdx + 1,
+      })
     }
 
     const headers = new Headers()

@@ -5,6 +5,11 @@ import { resolveRequestId, jsonOk } from '@/lib/api-response'
 
 export const dynamic = 'force-dynamic'
 
+/** 费用保留 6 位小数（0.000001 美元 ≈ 一次小请求），null 原样返回 */
+function round6(v: number | null): number | null {
+  return v == null ? null : Math.round(v * 1e6) / 1e6
+}
+
 /**
  * 一站式汇总（CLI / 仪表盘用）：
  * 渠道状态统计 + 今日/累计调用 + 密钥配额 + 各路由配置
@@ -14,7 +19,7 @@ export async function GET(req: Request) {
   const denied = await requireAdmin(req)
   if (denied) return denied
 
-  const [channels, routes, tokens, todayAgg, totalAgg, byChannel] = await Promise.all([
+  const [channels, routes, tokens, todayAgg, totalAgg, byChannel, todayCost, totalCost] = await Promise.all([
     db.channel.findMany({
       orderBy: { createdAt: 'asc' },
       select: { name: true, enabled: true, autoDisabled: true, status: true, latencyMs: true, apiFormat: true, failStreak: true, lastError: true },
@@ -43,6 +48,12 @@ export async function GET(req: Request) {
       _count: { _all: true },
       _sum: { latencyMs: true },
     }),
+    // 费用聚合（costUsd 仅成功请求且渠道标注了价格才写入，null 自动不计入）
+    db.requestLog.aggregate({
+      where: { createdAt: { gte: new Date(new Date().setHours(0, 0, 0, 0)) } },
+      _sum: { costUsd: true },
+    }),
+    db.requestLog.aggregate({ _sum: { costUsd: true } }),
   ])
 
   const todayCalls = todayAgg.reduce((s, g) => s + g._count._all, 0)
@@ -77,7 +88,8 @@ export async function GET(req: Request) {
     tokens,
     channelUsage,
     stats: {
-      today: { calls: todayCalls, fails: todayFails },
+      today: { calls: todayCalls, fails: todayFails, costUsd: round6(todayCost._sum.costUsd) },
+      totalCostUsd: round6(totalCost._sum.costUsd),
       totalCalls: totalAgg._count._all,
       channelsOnline: channels.filter((c) => c.enabled && c.status === 'online').length,
       channelsDown: channels.filter((c) => c.enabled && (c.status === 'offline' || c.autoDisabled)).length,

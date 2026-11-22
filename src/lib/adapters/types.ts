@@ -3,6 +3,13 @@ import type { OpenAIBody } from '@/lib/anthropic'
 /** 渠道 API 协议格式（可扩展：新增协议在此注册） */
 export type ApiFormat = 'openai' | 'anthropic' | 'gemini'
 
+/** 用量统计（费用估算数据源：costUsd = priceIn/1M×prompt + priceOut/1M×completion） */
+export interface UsageStats {
+  promptTokens: number | null
+  completionTokens: number | null
+  totalTokens: number | null
+}
+
 /**
  * 协议适配器：网关对上游协议的全部认知收敛于此接口。
  * 网关主流程只面向该接口编程，新增协议（如 azure-openai）= 新增一个适配器文件并注册，零改动主流程。
@@ -20,8 +27,8 @@ export interface ProtocolAdapter {
   buildHeaders(apiKey: string): Record<string, string>
   /** 构造上游请求体（含渠道级模型名映射） */
   buildRequestBody(body: OpenAIBody, model: string): string
-  /** 从非流式响应 JSON 提取总 Token 数（提取失败返回 null，不影响转发） */
-  extractUsage(json: unknown): number | null
+  /** 从非流式响应 JSON 提取 Token 用量（prompt/completion 拆分；提取失败字段为 null，不影响转发） */
+  extractUsage(json: unknown): UsageStats
   /** 从非流式响应 JSON 提取回复文本（一键对话测试用） */
   extractReply(json: unknown): string
   /** 非流式响应体转换（缺省 = 原样透传，openai 格式无需转换） */

@@ -12,13 +12,14 @@ export async function GET(req: Request) {
   const denied = await requireAdmin(req)
   if (denied) return denied
   const rows = await db.setting.findMany({
-    where: { key: { in: ['circuitBreaker', 'cbThreshold'] } },
+    where: { key: { in: ['circuitBreaker', 'cbThreshold', 'alertWebhookUrl'] } },
   })
   const map = Object.fromEntries(rows.map((r) => [r.key, r.value]))
   return jsonOk(
     {
       circuitBreaker: map.circuitBreaker !== 'off', // 默认开启
       cbThreshold: Math.max(1, Number(map.cbThreshold ?? 3) || 3),
+      alertWebhookUrl: map.alertWebhookUrl ?? '',
     },
     { requestId }
   )
@@ -34,6 +35,7 @@ export async function PUT(req: Request) {
   const v = new Validator(body)
   const circuitBreaker = v.boolean('circuitBreaker')
   const cbThreshold = v.integer('cbThreshold', { min: 1, max: 100 })
+  const alertWebhookUrl = v.string('alertWebhookUrl', { max: 500, required: false })
   if (v.failed()) return validationResponse(v)
 
   const updates: Array<{ key: string; value: string }> = []
@@ -42,6 +44,11 @@ export async function PUT(req: Request) {
   }
   if (cbThreshold !== undefined) {
     updates.push({ key: 'cbThreshold', value: String(cbThreshold) })
+  }
+  if (alertWebhookUrl !== undefined) {
+    const url = alertWebhookUrl.trim()
+    if (url && !/^https?:\/\//.test(url)) return jsonBadRequest('webhook 地址必须是 http(s) URL', requestId)
+    updates.push({ key: 'alertWebhookUrl', value: url })
   }
   if (updates.length === 0) return jsonBadRequest('无可更新字段', requestId)
 

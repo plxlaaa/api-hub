@@ -238,6 +238,13 @@ export function DashboardTab() {
             hint="自网关启用以来"
           />
           <Metric
+            label="今日费用"
+            value={stats?.today.costUsd == null ? '—' : stats.today.costUsd < 0.01 ? `<${0.01.toFixed(2)}` : `$${stats.today.costUsd.toFixed(2)}`}
+            unit={stats?.today.costUsd == null ? undefined : ''}
+            kind={stats?.today.costUsd == null ? 'idle' : 'info'}
+            hint={stats?.today.costUsd == null ? '渠道未标注价格或暂无调用' : `累计 $${(stats.totalCostUsd ?? 0).toFixed(2)}`}
+          />
+          <Metric
             label="探测延迟"
             value={probeAvg == null ? '—' : (probeAvg / 1000).toFixed(2)}
             unit={probeAvg == null ? undefined : 's'}

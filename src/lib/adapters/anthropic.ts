@@ -17,8 +17,11 @@ export const anthropicAdapter: ProtocolAdapter = {
   },
   extractUsage(json) {
     const u = (json as { usage?: { input_tokens?: number; output_tokens?: number } })?.usage
-    const total = (u?.input_tokens ?? 0) + (u?.output_tokens ?? 0)
-    return total || null
+    const n = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) && x >= 0 ? x : null)
+    const input = n(u?.input_tokens)
+    const output = n(u?.output_tokens)
+    const total = input !== null && output !== null ? input + output : (input ?? output)
+    return { promptTokens: input, completionTokens: output, totalTokens: total }
   },
   extractReply(json) {
     const j = json as { content?: Array<{ type?: string; text?: string }> }

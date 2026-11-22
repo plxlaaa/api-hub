@@ -20,8 +20,12 @@ export const geminiAdapter: ProtocolAdapter = {
     return JSON.stringify(toGeminiRequest(body, model))
   },
   extractUsage(json) {
-    const total = (json as { usageMetadata?: { totalTokenCount?: number } })?.usageMetadata?.totalTokenCount
-    return typeof total === 'number' ? total : null
+    const m = (json as { usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number; totalTokenCount?: number } })?.usageMetadata
+    const n = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) && x >= 0 ? x : null)
+    const prompt = n(m?.promptTokenCount)
+    const completion = n(m?.candidatesTokenCount)
+    const total = n(m?.totalTokenCount) ?? (prompt !== null && completion !== null ? prompt + completion : null)
+    return { promptTokens: prompt, completionTokens: completion, totalTokens: total }
   },
   extractReply(json) {
     const g = json as { candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }> }

@@ -216,6 +216,7 @@ export function RequestLogsTab() {
                   { key: 'result', header: '结果' },
                   { key: 'latency', header: '延迟', align: 'right' },
                   { key: 'tokens', header: 'Tokens', align: 'right', className: 'hidden sm:table-cell' },
+                  { key: 'cost', header: '费用', align: 'right', className: 'hidden md:table-cell' },
                   { key: 'detail', header: '详情', className: 'hidden lg:table-cell max-w-64' },
                 ]}
                 items={logs.map((l) => ({
@@ -236,6 +237,10 @@ export function RequestLogsTab() {
                     {
                       label: 'Tokens',
                       value: l.totalTokens == null ? <span className="text-muted-foreground">—</span> : <span className="tabular">{l.totalTokens.toLocaleString()}</span>,
+                    },
+                    {
+                      label: '费用',
+                      value: l.costUsd == null ? <span className="text-muted-foreground">—</span> : <span className="tabular">${l.costUsd < 0.01 ? l.costUsd.toFixed(4) : l.costUsd.toFixed(2)}</span>,
                     },
                     {
                       label: '尝试',
@@ -320,6 +325,10 @@ export function RequestLogsTab() {
                     case 'tokens':
                       return (
                         <span className="tabular text-caption">{l.totalTokens?.toLocaleString() ?? '—'}</span>
+                      )
+                    case 'cost':
+                      return (
+                        <span className="tabular text-caption">{l.costUsd == null ? '—' : `$${l.costUsd < 0.01 ? l.costUsd.toFixed(4) : l.costUsd.toFixed(2)}`}</span>
                       )
                     case 'detail':
                       return l.error ? (

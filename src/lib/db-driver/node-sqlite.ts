@@ -116,7 +116,8 @@ const TABLES: Record<string, Record<string, string>> = {
   },
   RequestLog: {
     id: T_STR, channelName: T_STR, model: T_STR, targetModel: T_STR, ok: T_BOOL, statusCode: T_INT,
-    latencyMs: T_INT, totalTokens: T_INT, tokenName: T_STR, stream: T_BOOL, attempt: T_INT,
+    latencyMs: T_INT, totalTokens: T_INT, promptTokens: T_INT, completionTokens: T_INT, costUsd: T_FLOAT,
+    tokenName: T_STR, stream: T_BOOL, attempt: T_INT,
     error: T_STR, createdAt: T_DATE,
   },
 }

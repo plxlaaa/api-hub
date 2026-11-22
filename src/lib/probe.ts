@@ -11,6 +11,7 @@ export const PROBE_INTERVAL_MS = resolveProbeIntervalMs()
 export const PROBE_ENABLED = process.env.GW_PROBE_ENABLED !== 'false'
 
 import { resolveProbeIntervalMs, selectProbeTargets } from '@/lib/probe-config'
+import { notifyChannelEvent } from '@/lib/alert-webhook'
 export { resolveProbeIntervalMs, selectProbeTargets }
 
 const PROBE_TIMEOUT_MS = 10_000
@@ -228,6 +229,7 @@ export async function probeChannelById(channelId: string): Promise<ProbeResult> 
         autoDisabled = true
         autoDisabledAt = new Date()
         log.warn('探测连续失败，渠道自动熔断摘除', { channelId, channel: ch.name, failStreak, threshold })
+        notifyChannelEvent('channel_disabled', ch.name, `探测连续失败 ${failStreak} 次（阈值 ${threshold}），渠道已自动摘除；恢复后可自动回切`)
       }
     }
   }
@@ -345,7 +347,7 @@ export async function testChannelChat(channelId: string, model?: string): Promis
     }
     const j = (await res.json().catch(() => ({}))) as unknown
     const reply = adapter.extractReply(j)
-    const totalTokens = adapter.extractUsage(j)
+    const totalTokens = adapter.extractUsage(j).totalTokens
     return { ok: true, model: target, latencyMs, reply, totalTokens, error: null }
   } catch (err) {
     const msg = err instanceof Error

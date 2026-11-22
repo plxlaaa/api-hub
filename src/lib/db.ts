@@ -207,6 +207,9 @@ const SCHEMA_DDL: string[] = [
      "statusCode" INTEGER,
      "latencyMs" INTEGER,
      "totalTokens" INTEGER,
+     "promptTokens" INTEGER,
+     "completionTokens" INTEGER,
+     "costUsd" REAL,
      "tokenName" TEXT,
      "stream" BOOLEAN NOT NULL DEFAULT false,
      "attempt" INTEGER NOT NULL DEFAULT 1,
@@ -230,6 +233,36 @@ async function tablesMissing(client: PrismaClient): Promise<boolean> {
   return rows.length < 6
 }
 
+/**
+ * 列级迁移兜底：node-sqlite 纯绑定路径没有 prisma db push，
+ * 老部署升级后靠 PRAGMA table_info 对比期望列，缺列 ALTER ADD 补齐（幂等）。
+ * 每次启动全表扫描一次，列齐后开销可忽略。
+ */
+const EXPECTED_COLUMNS: Record<string, Array<{ name: string; ddl: string }>> = {
+  RequestLog: [
+    { name: 'promptTokens', ddl: 'ALTER TABLE "RequestLog" ADD COLUMN "promptTokens" INTEGER' },
+    { name: 'completionTokens', ddl: 'ALTER TABLE "RequestLog" ADD COLUMN "completionTokens" INTEGER' },
+    { name: 'costUsd', ddl: 'ALTER TABLE "RequestLog" ADD COLUMN "costUsd" REAL' },
+  ],
+}
+
+async function ensureColumns(client: PrismaClient): Promise<void> {
+  for (const [table, cols] of Object.entries(EXPECTED_COLUMNS)) {
+    try {
+      const rows = (await client.$queryRawUnsafe<{ name: string }[]>(`PRAGMA table_info("${table}")`)) as unknown as { name: string }[]
+      const have = new Set((rows as unknown as Array<{ name: string }>).map((r) => r.name))
+      for (const c of cols) {
+        if (!have.has(c.name)) {
+          await client.$executeRawUnsafe(c.ddl)
+          log.info('已补列', { table, column: c.name })
+        }
+      }
+    } catch (err) {
+      log.warn('列迁移检查失败（继续运行）', { table, error: err instanceof Error ? err.message : String(err) })
+    }
+  }
+}
+
 /** @returns 本次是否新建了表（false = 表已就绪或建表失败） */
 async function ensureSchema(client: PrismaClient): Promise<boolean> {
   try {
@@ -249,6 +282,7 @@ async function ensureSchema(client: PrismaClient): Promise<boolean> {
 
 async function bootstrap(client: PrismaClient): Promise<void> {
   const created = await ensureSchema(client)
+  await ensureColumns(client)
   const failedPragmas = await applyPragmas(client)
   // 只有真的连上库才敢报「就绪」：此前无论 PRAGMA 是否失败都无条件打印就绪，
   // 目录缺失等场景下会输出误导性的成功日志，把排查方向带偏。

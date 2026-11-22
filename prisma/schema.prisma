@@ -96,6 +96,9 @@ model RequestLog {
   statusCode  Int?
   latencyMs   Int?
   totalTokens Int?
+  promptTokens Int? // 输入 token（费用估算；null=上游未回 usage）
+  completionTokens Int? // 输出 token
+  costUsd Float? // 估算费用（美元）：priceIn/1M×prompt + priceOut/1M×completion
   tokenName   String? // 发起请求的统一密钥名（管理员测试为空）
   stream      Boolean  @default(false)
   attempt     Int      @default(1) // 第几次渠道尝试（故障转移时 2/3…）

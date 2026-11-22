@@ -78,7 +78,10 @@ export interface RequestLogItem {
   ok: boolean
   statusCode: number | null
   latencyMs: number | null
-  totalTokens: number | null
+  totalTokens?: number | null
+  promptTokens?: number | null
+  completionTokens?: number | null
+  costUsd?: number | null
   tokenName: string | null // 发起请求的统一密钥名（管理员测试为空）
   stream: boolean
   attempt?: number // 第几次渠道尝试（故障转移时 2/3…，缺省视为 1）
@@ -88,7 +91,8 @@ export interface RequestLogItem {
 
 export interface Stats {
   total: { calls: number; fails: number }
-  today: { calls: number; fails: number }
+  today: { calls: number; fails: number; costUsd?: number | null }
+  totalCostUsd?: number | null
   hourly: Array<{ hour: string; calls: number; fails: number }>
   daily7?: Array<{ date: string; calls: number; fails: number; tokens: number }>
   topModels: Array<{ model: string; calls: number }>

@@ -14,8 +14,13 @@ export const openaiAdapter: ProtocolAdapter = {
     return JSON.stringify({ ...body, model })
   },
   extractUsage(json: unknown) {
-    const total = (json as { usage?: { total_tokens?: number } })?.usage?.total_tokens
-    return typeof total === 'number' ? total : null
+    const u = (json as { usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } })?.usage
+    if (!u || typeof u !== 'object') return { promptTokens: null, completionTokens: null, totalTokens: null }
+    const n = (x: unknown) => (typeof x === 'number' && Number.isFinite(x) && x >= 0 ? x : null)
+    const prompt = n(u.prompt_tokens)
+    const completion = n(u.completion_tokens)
+    const total = n(u.total_tokens) ?? (prompt !== null && completion !== null ? prompt + completion : null)
+    return { promptTokens: prompt, completionTokens: completion, totalTokens: total }
   },
   extractReply(json: unknown) {
     return (json as { choices?: Array<{ message?: { content?: string } }> })?.choices?.[0]?.message?.content ?? '(空回复)'
