@@ -2,7 +2,7 @@
 import { useRef, useState } from 'react'
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { BarChart3, FileDown, Loader2, RefreshCw, ScrollText, Store, Trophy, Upload } from 'lucide-react'
+import { BarChart3, FileDown, FileUp, Loader2, RefreshCw, ScrollText, Store, Trophy, Upload } from 'lucide-react'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -86,6 +86,7 @@ export function DashboardTab() {
   // 渠道横评 Top5：按累计调用量排序（数据来自 V23 渠道统计聚合）
   const topChannels = [...channels].filter((c) => (c.stats?.calls ?? 0) > 0).sort((a, b) => (b.stats?.calls ?? 0) - (a.stats?.calls ?? 0)).slice(0, 5)
   const [trendMode, setTrendMode] = useState<'24h' | '7d'>('24h')
+  const fileRef = useRef<HTMLInputElement>(null)
 
   // 配置备份（fetch+blob 下载，Cookie 会话自动携带）
   const exportConfig = async (withKeys: boolean) => {
@@ -132,90 +133,63 @@ export function DashboardTab() {
 
   return (
     <div className="space-y-6">
-      {/* 备份工具栏：窄屏横向滚动，避免按钮堆三行 */}
-      <div className="no-scrollbar -mx-4 flex items-center gap-1.5 overflow-x-auto px-4">
-        <Button size="sm" variant="outline" onClick={() => exportConfig(false)} className="shrink-0">
-          <FileDown className="h-4 w-4" />
-          导出配置（不含密钥）
-        </Button>
-        <Button size="sm" variant="outline" onClick={() => exportConfig(true)} className="shrink-0">
-          <FileDown className="h-4 w-4" />
-          导出完整备份（含密钥）
-        </Button>
-        <Button
-          size="sm"
-          variant="outline"
-          className="shrink-0"
-          disabled={importConfig.isPending}
-          onClick={() => importFileRef.current?.click()}
-        >
-          {importConfig.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-          导入备份
-        </Button>
-        <input
-          ref={importFileRef}
-          type="file"
-          accept="application/json,.json"
-          className="hidden"
-          onChange={(e) => {
-            const f = e.target.files?.[0]
-            if (f) importConfig.mutate(f)
-            e.target.value = ''
-          }}
-        />
-      </div>
-
-      {/* ── 渠道健康：仪表读数区 ─────────────────────── */}
-      <section aria-label="渠道健康" className="panel p-4">
+      {/* ── 英雄区：渠道健康 + 调用统计合并读数 ──────────── */}
+      <section aria-label="网关概览" className="panel p-4">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold tracking-tight">渠道健康</h2>
           <div className="flex flex-wrap items-center gap-3 text-caption">
             <StatusLabel kind="ok" live={offline === 0 && online > 0}>{online} 在线</StatusLabel>
             {offline > 0 && <StatusLabel kind="danger">{offline} 异常</StatusLabel>}
             {disabled > 0 && <StatusLabel kind="idle">{disabled} 停用</StatusLabel>}
+            <span className="text-muted-foreground">
+              今日成功率{' '}
+              <span
+                className={cn(
+                  'tabular font-medium',
+                  successRateValue == null && 'text-status-idle',
+                  successRateValue != null && successRateValue >= 95 && 'text-status-ok',
+                  successRateValue != null && successRateValue >= 80 && successRateValue < 95 && 'text-status-info',
+                  successRateValue != null && successRateValue >= 50 && successRateValue < 80 && 'text-status-warn',
+                  successRateValue != null && successRateValue < 50 && 'text-status-danger'
+                )}
+              >
+                {successRate}
+              </span>
+            </span>
+          </div>
+          {/* 备份工具：收进卡头右侧（窄屏滚动） */}
+          <div className="no-scrollbar -mx-1 flex items-center gap-1.5 overflow-x-auto px-1">
+            <Button size="sm" variant="outline" onClick={() => exportConfig(false)} className="shrink-0">
+              <FileDown className="h-4 w-4" />
+              <span className="hidden sm:inline">导出配置</span>
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => exportConfig(true)} className="shrink-0">
+              <FileDown className="h-4 w-4" />
+              <span className="hidden sm:inline">完整备份</span>
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="shrink-0"
+              disabled={importConfig.isPending}
+              onClick={() => fileRef.current?.click()}
+            >
+              {importConfig.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileUp className="h-4 w-4" />}
+              <span className="hidden sm:inline">导入</span>
+            </Button>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="application/json,.json"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0]
+                if (f) importConfig.mutate(f)
+                e.target.value = ''
+              }}
+            />
           </div>
         </div>
-        <MetricGrid>
-          <Metric
-            label="渠道总数"
-            value={channels.length}
-            unit="个"
-            kind={channels.length === 0 ? 'idle' : 'info'}
-            hint={channels.length === 0 ? '尚未接入上游' : `已启用 ${channels.length - disabled} 个`}
-          />
-          <Metric label="在线" value={online} unit="个" kind={online > 0 ? 'ok' : 'idle'} hint="探测正常可转发" />
-          <Metric
-            label="异常"
-            value={offline}
-            unit="个"
-            kind={offline > 0 ? 'danger' : 'ok'}
-            hint={offline > 0 ? '需检查 Key 或上游' : '全部正常'}
-          />
-          <Metric label="已停用" value={disabled} unit="个" kind="idle" hint="不参与路由" />
-        </MetricGrid>
-      </section>
-
-      {/* ── 调用统计：仪表读数区 ─────────────────────── */}
-      <section aria-label="调用统计" className="panel p-4">
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold tracking-tight">调用统计</h2>
-          <span className="text-caption text-muted-foreground">
-            今日成功率{' '}
-            <span
-              className={cn(
-                'tabular font-medium',
-                successRateValue == null && 'text-status-idle',
-                successRateValue != null && successRateValue >= 95 && 'text-status-ok',
-                successRateValue != null && successRateValue >= 80 && successRateValue < 95 && 'text-status-info',
-                successRateValue != null && successRateValue >= 50 && successRateValue < 80 && 'text-status-warn',
-                successRateValue != null && successRateValue < 50 && 'text-status-danger'
-              )}
-            >
-              {successRate}
-            </span>
-          </span>
-        </div>
-        <MetricGrid>
+        <MetricGrid className="xl:grid-cols-4">
           <Metric
             label="今日调用"
             value={(stats?.today.calls ?? 0).toLocaleString()}
@@ -228,7 +202,14 @@ export function DashboardTab() {
             value={(stats?.today.fails ?? 0).toLocaleString()}
             unit="次"
             kind={(stats?.today.fails ?? 0) > 0 ? 'danger' : 'ok'}
-            hint={(stats?.today.fails ?? 0) > 0 ? '检查下方日志定位原因' : '无失败请求'}
+            hint={(stats?.today.fails ?? 0) > 0 ? '检查日志定位原因' : '无失败请求'}
+          />
+          <Metric
+            label="今日费用"
+            value={stats?.today.costUsd == null ? '—' : stats.today.costUsd < 0.01 ? `<$0.01` : `$${stats.today.costUsd.toFixed(2)}`}
+            unit={stats?.today.costUsd == null ? undefined : ''}
+            kind={stats?.today.costUsd == null ? 'idle' : 'info'}
+            hint={stats?.today.costUsd == null ? '渠道未标注价格或暂无调用' : `累计 $${(stats.totalCostUsd ?? 0).toFixed(2)}`}
           />
           <Metric
             label="累计调用"
@@ -238,11 +219,19 @@ export function DashboardTab() {
             hint="自网关启用以来"
           />
           <Metric
-            label="今日费用"
-            value={stats?.today.costUsd == null ? '—' : stats.today.costUsd < 0.01 ? `<${0.01.toFixed(2)}` : `$${stats.today.costUsd.toFixed(2)}`}
-            unit={stats?.today.costUsd == null ? undefined : ''}
-            kind={stats?.today.costUsd == null ? 'idle' : 'info'}
-            hint={stats?.today.costUsd == null ? '渠道未标注价格或暂无调用' : `累计 $${(stats.totalCostUsd ?? 0).toFixed(2)}`}
+            label="渠道总数"
+            value={channels.length}
+            unit="个"
+            kind={channels.length === 0 ? 'idle' : 'info'}
+            hint={`已启用 ${channels.length - disabled} 个`}
+          />
+          <Metric label="在线" value={online} unit="个" kind={online > 0 ? 'ok' : 'idle'} hint="探测正常可转发" />
+          <Metric
+            label="异常"
+            value={offline}
+            unit="个"
+            kind={offline > 0 ? 'danger' : 'ok'}
+            hint={offline > 0 ? '需检查 Key 或上游' : '全部正常'}
           />
           <Metric
             label="探测延迟"
@@ -254,67 +243,11 @@ export function DashboardTab() {
         </MetricGrid>
       </section>
 
-      {/* ── 密钥配额 ─────────────────────────────────── */}
-      {tokens.length > 0 && (
-        <section aria-label="密钥配额" className="panel p-4">
-          <SectionHeading
-            title="密钥配额"
-            description={`共 ${tokens.filter((t) => t.enabled).length} 个启用密钥`}
-          />
-          <ul className="mt-3.5 flex flex-col gap-1.5">
-            {tokens.map((t) => {
-              const hasLimit = t.quotaLimit !== null
-              const pct = hasLimit ? Math.min(100, Math.round((t.quotaUsed / t.quotaLimit!) * 100)) : null
-              const exhausted = hasLimit && t.quotaUsed >= t.quotaLimit!
-              return (
-                <li
-                  key={t.id}
-                  className="flex flex-col gap-1.5 rounded-lg border border-hairline px-3 py-2.5 sm:flex-row sm:items-center sm:gap-3"
-                >
-                  <div className="flex min-w-0 items-center gap-2 sm:w-44 sm:shrink-0">
-                    <StatusDot kind={t.enabled ? 'ok' : 'idle'} />
-                    <span className="truncate text-caption font-medium" title={t.name}>
-                      {t.name}
-                    </span>
-                    {!t.enabled && (
-                      <Badge variant="outline" className="shrink-0 px-1 py-0 text-micro text-status-idle">
-                        停用
-                      </Badge>
-                    )}
-                  </div>
-                  {pct != null ? (
-                    <>
-                      <RatioBar
-                        value={pct}
-                        kind={exhausted ? 'danger' : pct > 80 ? 'warn' : 'ok'}
-                        className="min-w-0 flex-1"
-                      />
-                      <span
-                        className={cn(
-                          'tabular shrink-0 text-micro sm:w-28 sm:text-right',
-                          exhausted ? 'font-medium text-status-danger' : 'text-muted-foreground'
-                        )}
-                      >
-                        {t.quotaUsed.toLocaleString()} / {t.quotaLimit!.toLocaleString()}
-                      </span>
-                    </>
-                  ) : (
-                    <>
-                      <span className="text-micro text-muted-foreground sm:flex-1">不限量</span>
-                      <span className="tabular shrink-0 text-micro text-muted-foreground">
-                        已用 {t.quotaUsed.toLocaleString()} 次
-                      </span>
-                    </>
-                  )}
-                </li>
-              )
-            })}
-          </ul>
-        </section>
-      )}
 
+      {/* ── 双列：趋势 + 密钥配额 ─────────────────────── */}
+      <div className="grid gap-4 lg:grid-cols-5 lg:items-start">
       {/* ── 调用趋势 ─────────────────────────────────── */}
-      <section aria-label="调用趋势" className="panel p-4">
+      <section aria-label="调用趋势" className="panel p-4 lg:col-span-3">
         <SectionHeading
           title={trendMode === '24h' ? '近 24 小时调用趋势' : '近 7 天调用趋势'}
           description="调用与失败的逐时/逐日分布"
@@ -404,6 +337,66 @@ export function DashboardTab() {
           )}
         </div>
       </section>
+      {/* ── 密钥配额 ─────────────────────────────────── */}
+      {tokens.length > 0 && (
+        <section aria-label="密钥配额" className="panel p-4 lg:col-span-2">
+          <SectionHeading
+            title="密钥配额"
+            description={`共 ${tokens.filter((t) => t.enabled).length} 个启用密钥`}
+          />
+          <ul className="mt-3.5 flex flex-col gap-1.5">
+            {tokens.map((t) => {
+              const hasLimit = t.quotaLimit !== null
+              const pct = hasLimit ? Math.min(100, Math.round((t.quotaUsed / t.quotaLimit!) * 100)) : null
+              const exhausted = hasLimit && t.quotaUsed >= t.quotaLimit!
+              return (
+                <li
+                  key={t.id}
+                  className="flex flex-col gap-1.5 rounded-lg border border-hairline px-3 py-2.5 sm:flex-row sm:items-center sm:gap-3"
+                >
+                  <div className="flex min-w-0 items-center gap-2 sm:w-44 sm:shrink-0">
+                    <StatusDot kind={t.enabled ? 'ok' : 'idle'} />
+                    <span className="truncate text-caption font-medium" title={t.name}>
+                      {t.name}
+                    </span>
+                    {!t.enabled && (
+                      <Badge variant="outline" className="shrink-0 px-1 py-0 text-micro text-status-idle">
+                        停用
+                      </Badge>
+                    )}
+                  </div>
+                  {pct != null ? (
+                    <>
+                      <RatioBar
+                        value={pct}
+                        kind={exhausted ? 'danger' : pct > 80 ? 'warn' : 'ok'}
+                        className="min-w-0 flex-1"
+                      />
+                      <span
+                        className={cn(
+                          'tabular shrink-0 text-micro sm:w-28 sm:text-right',
+                          exhausted ? 'font-medium text-status-danger' : 'text-muted-foreground'
+                        )}
+                      >
+                        {t.quotaUsed.toLocaleString()} / {t.quotaLimit!.toLocaleString()}
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-micro text-muted-foreground sm:flex-1">不限量</span>
+                      <span className="tabular shrink-0 text-micro text-muted-foreground">
+                        已用 {t.quotaUsed.toLocaleString()} 次
+                      </span>
+                    </>
+                  )}
+                </li>
+              )
+            })}
+          </ul>
+        </section>
+      )}
+      </div>
+
 
       {/* ── 渠道横评 Top5 ─────────────────────────────── */}
       <section aria-label="渠道横评" className="panel p-4">

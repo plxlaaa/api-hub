@@ -76,7 +76,7 @@ function useTabParam(): [string, (v: string) => void] {
   return [current, set]
 }
 
-/** 全局健康指示：吸顶头部常驻，运维一眼看到「系统现在好不好」 */
+/** 全局健康指示：侧栏/顶栏常驻，运维一眼看到「系统现在好不好」 */
 function HealthPill() {
   const { data } = useQuery<Overview>({
     queryKey: ['overview'],
@@ -141,6 +141,34 @@ function BrandMark({ compact = false }: { compact?: boolean }) {
   )
 }
 
+/** 侧栏导航项：active 用主色软底+左侧指示条，视觉锚点明确 */
+function SidebarNav({ tab, go }: { tab: string; go: (v: string) => void }) {
+  return (
+    <nav className="flex flex-1 flex-col gap-0.5 px-3" aria-label="主导航">
+      {NAV.map((n) => {
+        const active = tab === n.value
+        return (
+          <button
+            key={n.value}
+            type="button"
+            onClick={() => go(n.value)}
+            aria-current={active ? 'page' : undefined}
+            className={cn(
+              'group relative flex min-h-9 items-center gap-2.5 rounded-md px-2.5 text-left text-sm font-medium transition-colors',
+              active ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-muted hover:text-foreground'
+            )}
+            title={n.hint}
+          >
+            {active && <span className="absolute inset-y-1.5 left-0 w-0.5 rounded-full bg-primary" />}
+            <n.icon className="h-4 w-4 shrink-0" />
+            <span className="truncate">{n.label}</span>
+          </button>
+        )
+      })}
+    </nav>
+  )
+}
+
 function Shell({ onLogout }: { onLogout: () => void }) {
   const router = useRouter()
   const [tab, setTab] = useTabParam()
@@ -160,132 +188,158 @@ function Shell({ onLogout }: { onLogout: () => void }) {
   }
 
   return (
-    <div className="flex min-h-dvh flex-col">
-      {/* ── 吸顶头部：安全区 + 毛玻璃 ─────────────────── */}
-      <header className="sticky top-0 z-30 border-b bg-background/85 backdrop-blur-md supports-[backdrop-filter]:bg-background/70">
-        <div className="pt-safe" />
-        <div className="mx-auto flex h-14 max-w-7xl items-center gap-3 px-4">
+    <div className="flex min-h-dvh">
+      {/* ── 桌面侧栏：品牌 + 全量导航 + 状态/操作（≥lg 才出现） ── */}
+      <aside className="sticky top-0 hidden h-dvh w-56 shrink-0 flex-col border-r bg-background pb-4 lg:flex">
+        <div className="px-4 pt-4 pb-3">
           <BrandMark />
-
-          <div className="ml-auto flex items-center gap-1.5">
+        </div>
+        <SidebarNav tab={tab} go={go} />
+        <div className="mt-auto space-y-2.5 px-4 pt-3">
+          <div className="h-px bg-border" />
+          <div className="flex items-center justify-between">
             <HealthPill />
             <ThemeToggle />
+          </div>
+          <div className="flex items-center gap-1">
             <Button
               size="sm"
               variant="ghost"
-              className="hidden sm:inline-flex"
+              className="h-8 flex-1 justify-start text-caption"
               onClick={() => router.push('/square')}
               title="浏览可用模型"
             >
-              <Store className="h-4 w-4" />
+              <Store className="h-3.5 w-3.5" />
               模型广场
             </Button>
             <Button
               size="icon"
               variant="ghost"
-              className="hidden h-9 w-9 sm:inline-flex"
+              className="h-8 w-8 shrink-0"
               onClick={onLogout}
               aria-label="退出登录"
               title="退出登录"
             >
               <LogOut className="h-4 w-4" />
             </Button>
+          </div>
+          <p className="pt-1 text-micro leading-tight text-muted-foreground">
+            把分散的公益站 API
+            <br />
+            聚合成一个地址、一个 Key
+          </p>
+        </div>
+      </aside>
 
-            {/* 窄屏：更多操作收进抽屉 */}
-            <Sheet open={moreOpen} onOpenChange={setMoreOpen}>
-              <SheetTrigger asChild>
-                <Button size="icon" variant="ghost" className="touch-target-icon h-9 w-9 sm:hidden" aria-label="更多操作">
-                  <MoreHorizontal className="h-4 w-4" />
-                </Button>
-              </SheetTrigger>
-              <SheetContent side="bottom" className="rounded-t-xl pb-safe">
-                <SheetHeader className="text-left">
-                  <SheetTitle>更多</SheetTitle>
-                  <SheetDescription className="sr-only">次级功能与账户操作</SheetDescription>
-                </SheetHeader>
-                <div className="flex flex-col gap-1.5 pb-2">
-                  {secondaryNav.map((n) => (
+      {/* ── 右列：窄屏顶栏 + 主内容 ───────────────────── */}
+      <div className="flex min-w-0 flex-1 flex-col">
+        {/* 窄屏吸顶头部（<lg 才出现；桌面顶部元素全在侧栏里） */}
+        <header className="sticky top-0 z-30 border-b bg-background/85 backdrop-blur-md supports-[backdrop-filter]:bg-background/70 lg:hidden">
+          <div className="pt-safe" />
+          <div className="flex h-14 items-center gap-3 px-4">
+            <BrandMark />
+            <div className="ml-auto flex items-center gap-1.5">
+              <HealthPill />
+              <ThemeToggle />
+              <Button
+                size="sm"
+                variant="ghost"
+                className="hidden sm:inline-flex"
+                onClick={() => router.push('/square')}
+                title="浏览可用模型"
+              >
+                <Store className="h-4 w-4" />
+                模型广场
+              </Button>
+
+              {/* 窄屏：更多操作收进抽屉 */}
+              <Sheet open={moreOpen} onOpenChange={setMoreOpen}>
+                <SheetTrigger asChild>
+                  <Button size="icon" variant="ghost" className="touch-target-icon h-9 w-9 sm:hidden" aria-label="更多操作">
+                    <MoreHorizontal className="h-4 w-4" />
+                  </Button>
+                </SheetTrigger>
+                <SheetContent side="bottom" className="rounded-t-xl pb-safe">
+                  <SheetHeader className="text-left">
+                    <SheetTitle>更多</SheetTitle>
+                    <SheetDescription className="sr-only">次级功能与账户操作</SheetDescription>
+                  </SheetHeader>
+                  <div className="flex flex-col gap-1.5 pb-2">
+                    {secondaryNav.map((n) => (
+                      <button
+                        key={n.value}
+                        type="button"
+                        onClick={() => go(n.value)}
+                        className={cn(
+                          'flex min-h-11 w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm transition-colors',
+                          tab === n.value ? 'bg-primary/10 text-primary' : 'hover:bg-muted'
+                        )}
+                      >
+                        <n.icon className="h-4 w-4 shrink-0" />
+                        <span className="min-w-0 flex-1">
+                          <span className="block font-medium">{n.label}</span>
+                          <span className="block truncate text-micro text-muted-foreground">{n.hint}</span>
+                        </span>
+                      </button>
+                    ))}
+                    <div className="my-1 h-px bg-border" />
                     <button
-                      key={n.value}
                       type="button"
-                      onClick={() => go(n.value)}
-                      className={cn(
-                        'flex min-h-11 w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm transition-colors',
-                        tab === n.value ? 'bg-primary/10 text-primary' : 'hover:bg-muted'
-                      )}
+                      onClick={() => {
+                        setMoreOpen(false)
+                        router.push('/square')
+                      }}
+                      className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm hover:bg-muted"
                     >
-                      <n.icon className="h-4 w-4 shrink-0" />
+                      <Store className="h-4 w-4 shrink-0" />
                       <span className="min-w-0 flex-1">
-                        <span className="block font-medium">{n.label}</span>
-                        <span className="block truncate text-micro text-muted-foreground">{n.hint}</span>
+                        <span className="block font-medium">模型广场</span>
+                        <span className="block truncate text-micro text-muted-foreground">浏览全部可用模型</span>
                       </span>
                     </button>
-                  ))}
-                  <div className="my-1 h-px bg-border" />
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setMoreOpen(false)
-                      router.push('/square')
-                    }}
-                    className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm hover:bg-muted"
-                  >
-                    <Store className="h-4 w-4 shrink-0" />
-                    <span className="min-w-0 flex-1">
-                      <span className="block font-medium">模型广场</span>
-                      <span className="block truncate text-micro text-muted-foreground">浏览全部可用模型</span>
-                    </span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={onLogout}
-                    className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm text-status-danger hover:bg-danger-soft"
-                  >
-                    <LogOut className="h-4 w-4 shrink-0" />
-                    <span className="font-medium">退出登录</span>
-                  </button>
-                </div>
-              </SheetContent>
-            </Sheet>
+                    <button
+                      type="button"
+                      onClick={onLogout}
+                      className="flex min-h-11 w-full items-center gap-3 rounded-lg px-3 py-2 text-left text-sm text-status-danger hover:bg-danger-soft"
+                    >
+                      <LogOut className="h-4 w-4 shrink-0" />
+                      <span className="font-medium">退出登录</span>
+                    </button>
+                  </div>
+                </SheetContent>
+              </Sheet>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="hidden h-9 w-9 sm:inline-flex"
+                onClick={onLogout}
+                aria-label="退出登录"
+                title="退出登录"
+              >
+                <LogOut className="h-4 w-4" />
+              </Button>
+            </div>
           </div>
-        </div>
+        </header>
 
-        {/* ── 桌面导航：带文字的完整标签 ─────────────── */}
-        <nav className="mx-auto hidden h-10 max-w-7xl items-center gap-0.5 px-3 lg:flex" aria-label="主导航">
-          {NAV.map((n) => (
-            <button
-              key={n.value}
-              type="button"
-              onClick={() => go(n.value)}
-              aria-current={tab === n.value ? 'page' : undefined}
-              className={cn(
-                'relative flex h-8 items-center gap-1.5 rounded-md px-2.5 text-caption font-medium whitespace-nowrap',
-                tab === n.value ? 'text-primary' : 'text-muted-foreground hover:text-foreground'
-              )}
-            >
-              <n.icon className="h-3.5 w-3.5" />
-              {n.label}
-              {tab === n.value && <span className="absolute inset-x-2 -bottom-px h-0.5 rounded-full bg-primary" />}
-            </button>
-          ))}
-        </nav>
-      </header>
-
-      {/* ── 主内容 ───────────────────────────────────── */}
-      <main className="mx-auto w-full max-w-7xl flex-1 px-4 pt-4 pb-24 lg:pb-8">
-        {/* 窄屏：当前区块的标题 + 说明（桌面在导航里已有，这里补上下文） */}
-        <div className="mb-3 lg:hidden">
-          <h2 className="text-base font-semibold tracking-tight">{current.label}</h2>
-          <p className="text-caption text-muted-foreground">{current.hint}</p>
-        </div>
-        {tab === 'dashboard' && <DashboardTab />}
-        {tab === 'channels' && <ChannelsTab />}
-        {tab === 'routes' && <RoutesTab />}
-        {tab === 'logs' && <RequestLogsTab />}
-        {tab === 'chat' && <ChatTab />}
-        {tab === 'tokens' && <TokensTab />}
-        {tab === 'usage' && <UsageTab />}
-      </main>
+        {/* ── 主内容：桌面靠侧栏导航后，main 自身加页面头（标题+hint） ── */}
+        <main className="mx-auto w-full max-w-7xl flex-1 px-4 pt-5 pb-24 lg:px-6 lg:pb-10">
+          <div className={cn('mb-4 flex flex-wrap items-end justify-between gap-x-4 gap-y-2')}>
+            <div>
+              <h2 className="text-lg font-semibold tracking-tight">{current.label}</h2>
+              <p className="text-caption text-muted-foreground">{current.hint}</p>
+            </div>
+          </div>
+          {/* 窄屏此前由各卡自带头；桌面新增统一页面头后，卡片标题降级为卡内小标题 */}
+          {tab === 'dashboard' && <DashboardTab />}
+          {tab === 'channels' && <ChannelsTab />}
+          {tab === 'routes' && <RoutesTab />}
+          {tab === 'logs' && <RequestLogsTab />}
+          {tab === 'chat' && <ChatTab />}
+          {tab === 'tokens' && <TokensTab />}
+          {tab === 'usage' && <UsageTab />}
+        </main>
+      </div>
 
       {/* ── 窄屏：吸底 Tab 栏（拇指可达区） ───────────── */}
       <nav
@@ -322,12 +376,6 @@ function Shell({ onLogout }: { onLogout: () => void }) {
           </button>
         </div>
       </nav>
-
-      <footer className="hidden border-t py-4 lg:block">
-        <p className="text-center text-micro text-muted-foreground">
-          API Hub — 把分散的公益站 API 聚合成一个地址、一个 Key
-        </p>
-      </footer>
     </div>
   )
 }

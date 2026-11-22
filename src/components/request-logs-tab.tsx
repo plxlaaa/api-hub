@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from 'react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ChevronDown, FileDown, Loader2, MessageSquare, RefreshCw, ScrollText, Trash2 } from 'lucide-react'
+import { ChevronDown, FileDown, Loader2, RefreshCw, ScrollText, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
   AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription,
@@ -82,11 +82,9 @@ export function RequestLogsTab() {
     <div className="space-y-4">
       <Card>
         <CardHeader className="flex min-w-0 flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <CardTitle className="flex flex-wrap items-center gap-x-2 gap-y-1 text-base">
-            <MessageSquare className="h-4 w-4 shrink-0" />
-            网关调用日志
-            <span className="text-caption font-normal text-muted-foreground">
-              已加载 <span className="tabular">{logs.length}</span> 条{hasMoreLogs ? ' · 还有更早记录' : ''} · 最多保留 2000 条
+          <CardTitle className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm font-normal">
+            <span className="text-muted-foreground">
+              已加载 <span className="tabular text-base font-semibold text-foreground">{logs.length}</span> 条{hasMoreLogs ? ' · 还有更早记录' : ' · 最多保留 2000 条'}
             </span>
           </CardTitle>
           <div className="no-scrollbar -mx-1 flex w-full min-w-0 items-center gap-1.5 overflow-x-auto px-1">

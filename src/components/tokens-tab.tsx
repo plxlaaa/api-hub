@@ -194,11 +194,10 @@ export function TokensTab() {
     <div className="space-y-4">
       <Card>
         <CardHeader className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-          <CardTitle className="text-base">
-            <span className="hidden lg:inline">统一调用密钥</span>
-            <span className="lg:hidden">共 </span>
-            <span className="tabular text-caption font-normal text-muted-foreground">{tokens.length}</span>
-            <span className="lg:hidden text-caption font-normal text-muted-foreground">个密钥</span>
+          <CardTitle className="flex items-center gap-2 text-sm">
+            <span>共</span>
+            <span className="tabular text-base font-semibold">{tokens.length}</span>
+            <span>个密钥</span>
           </CardTitle>
           <Button size="sm" onClick={() => { setNewKey(null); setCreateOpen(true) }} className="shrink-0">
             <Plus className="h-4 w-4" />生成密钥

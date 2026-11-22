@@ -261,11 +261,10 @@ export function RoutesTab() {
       <Card>
         <CardHeader className="space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <CardTitle className="text-base">
-              <span className="hidden lg:inline">模型路由</span>
-              <span className="lg:hidden">共 </span>
-              <span className="tabular text-caption font-normal text-muted-foreground">{routes.length}</span>
-              <span className="lg:hidden text-caption font-normal text-muted-foreground">条路由</span>
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <span>共</span>
+              <span className="tabular text-base font-semibold">{routes.length}</span>
+              <span>条路由</span>
             </CardTitle>
             <Button size="sm" onClick={openCreate} className="shrink-0">
               <Plus className="h-4 w-4" />添加路由

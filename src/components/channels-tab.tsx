@@ -261,11 +261,10 @@ export function ChannelsTab() {
       <Card>
         <CardHeader className="space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
-            <CardTitle className="text-base">
-              <span className="hidden lg:inline">渠道管理</span>
-              <span className="lg:hidden">共 </span>
-              <span className="tabular text-caption font-normal text-muted-foreground">{channels.length}</span>
-              <span className="lg:hidden text-caption font-normal text-muted-foreground">个渠道</span>
+            <CardTitle className="flex items-center gap-2 text-sm">
+              <span>共</span>
+              <span className="tabular text-base font-semibold">{channels.length}</span>
+              <span>个渠道</span>
             </CardTitle>
             <span className="text-caption text-muted-foreground">
               在线 <span className="tabular text-status-ok">{channels.filter((c) => c.status === 'online' && c.enabled).length}</span>
