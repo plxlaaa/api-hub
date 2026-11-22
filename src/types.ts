@@ -12,6 +12,7 @@ export interface Channel {
   latencyMs: number | null
   lastCheckAt: string | null
   lastError: string | null
+  metadata: Record<string, string | number | boolean> | null // 扩展字段（probeMode 等渠道级开关）
   remark: string | null
   createdAt: string
   stats?: { calls: number; ok: number; tokens: number; avgLatencyMs: number | null }

@@ -5,6 +5,7 @@ import { checkUpstreamUrlWithDns, allowsInternalUrl } from '@/lib/url-safety'
 import { resolveRequestId, jsonOk, jsonError, jsonBadRequest } from '@/lib/api-response'
 import { Validator, validationResponse } from '@/lib/validate'
 import { log } from '@/lib/logger'
+import { parseMetadata } from '@/lib/metadata'
 
 export const dynamic = 'force-dynamic'
 
@@ -49,8 +50,30 @@ export async function PUT(req: Request, { params }: Params) {
   if (apiKey) data.apiKey = apiKey
   if (apiFormat) data.apiFormat = apiFormat
   if (models) data.models = JSON.stringify(models)
-  if (remark !== undefined) data.remark = remark === '' ? null : remark
-  if (enabled !== undefined) data.enabled = enabled
+  if (body.metadata !== undefined) {
+    // 值级 null = 删该键；其余走 parseMetadata 校验（扁平对象、基础类型）
+    const raw = body.metadata as Record<string, unknown> | null
+    const deleteKeys = raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? Object.entries(raw).filter(([, v]) => v === null).map(([k]) => k)
+      : []
+    const parsed = parseMetadata(raw)
+    if (parsed === null) return jsonBadRequest('metadata 必须是扁平对象（值为基础类型）', requestId)
+    const merged: Record<string, string | number | boolean> = { ...(ch.metadata as Record<string, string | number | boolean> | null ?? {}) }
+    for (const k of deleteKeys) delete merged[k]
+    for (const [k, val] of Object.entries(parsed)) merged[k] = val
+    data.metadata = Object.keys(merged).length > 0 ? JSON.stringify(merged) : null
+  }
+  // metadata 浅合并：保留旧键、覆盖新键、null 删键（单键更新语义，前端只传要改的键）
+  if (body.metadata !== undefined) {
+    const parsed = parseMetadata(body.metadata)
+    if (parsed === null) return jsonBadRequest('metadata 必须是扁平对象（值为基础类型）', requestId)
+    const merged: Record<string, string | number | boolean> = { ...(ch.metadata as Record<string, string | number | boolean> | null ?? {}) }
+    for (const [k, val] of Object.entries(parsed)) {
+      if (val === null) delete merged[k]
+      else merged[k] = val
+    }
+    data.metadata = Object.keys(merged).length > 0 ? JSON.stringify(merged) : null
+  }
   // 手动启用渠道时清除熔断状态与失败计数
   if (enabled === true) {
     data.autoDisabled = false

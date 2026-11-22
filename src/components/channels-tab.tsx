@@ -35,9 +35,11 @@ interface ChannelForm {
   modelsText: string
   remark: string
   enabled: boolean
+  /** 主动探测开关（metadata.probeMode；'off' = 跳过主动探测，熔断恢复仍靠半开试探） */
+  probeMode: 'on' | 'off'
 }
 
-const EMPTY_FORM: ChannelForm = { name: '', baseUrl: '', apiKey: '', apiFormat: 'openai', modelsText: '', remark: '', enabled: true }
+const EMPTY_FORM: ChannelForm = { name: '', baseUrl: '', apiKey: '', apiFormat: 'openai', modelsText: '', remark: '', enabled: true, probeMode: 'on' }
 
 export function ChannelsTab() {
   const qc = useQueryClient()
@@ -74,6 +76,7 @@ export function ChannelsTab() {
       id: c.id, name: c.name, baseUrl: c.baseUrl, apiKey: '', // 安全起见不回显，留空则不修改
       apiFormat: c.apiFormat === 'anthropic' ? 'anthropic' : 'openai',
       modelsText: c.models.join('\n'), remark: c.remark || '', enabled: c.enabled,
+      probeMode: (c.metadata as Record<string, unknown> | null)?.probeMode === 'off' ? 'off' : 'on',
     })
     setDialogOpen(true)
   }
@@ -84,6 +87,7 @@ export function ChannelsTab() {
         name: f.name, baseUrl: f.baseUrl, apiKey: f.apiKey || undefined,
         apiFormat: f.apiFormat,
         models: f.modelsText, remark: f.remark || null, enabled: f.enabled,
+        metadata: { probeMode: f.probeMode === 'off' ? 'off' : null }, // null = 删键恢复默认探测
       }
       return f.id
         ? api(`/api/channels/${f.id}`, { method: 'PUT', body: JSON.stringify(payload) })
@@ -357,6 +361,9 @@ export function ChannelsTab() {
                     title: (
                       <span className="flex items-center gap-1.5">
                         <span className="truncate">{c.name}</span>
+                        {(c.metadata as Record<string, unknown> | null)?.probeMode === 'off' && (
+                          <Badge variant="outline" className="shrink-0 px-1.5 py-0 text-micro font-normal text-muted-foreground" title="定时探测已关闭，熔断恢复靠半开试探">不探测</Badge>
+                        )}
                         {c.apiFormat !== 'openai' && (
                           <Badge
                             variant="outline"
@@ -626,6 +633,13 @@ export function ChannelsTab() {
             <div className="space-y-1.5">
               <Label>备注</Label>
               <Input placeholder="可选" value={form.remark} onChange={(e) => setForm({ ...form, remark: e.target.value })} />
+            </div>
+            <div className="flex items-center justify-between rounded-md border p-3">
+              <div>
+                <p className="text-sm font-medium">主动探测</p>
+                <p className="text-xs text-muted-foreground">关闭后定时探测跳过该渠道（省上游配额；熔断恢复仍靠半开试探）</p>
+              </div>
+              <Switch checked={form.probeMode === 'on'} onCheckedChange={(v) => setForm({ ...form, probeMode: v ? 'on' : 'off' })} />
             </div>
             <div className="flex items-center justify-between rounded-md border p-3">
               <div>

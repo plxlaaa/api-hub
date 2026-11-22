@@ -4,7 +4,15 @@ import { getAdapter, resolveChatEndpoint } from '@/lib/adapters'
 import { redactSecrets } from '@/lib/redact'
 import { parseStringArray } from '@/lib/json-field'
 
-export const PROBE_INTERVAL_MS = 60_000
+/** 全量探测间隔（GW_PROBE_INTERVAL_MS 环境变量，缺省 60s，clamp 10s~1h）——公益站限流场景可调大 */
+export const PROBE_INTERVAL_MS = resolveProbeIntervalMs()
+
+/** 全局探测开关（GW_PROBE_ENABLED，缺省开）——纯被动模式（仅真实流量熔断）可关 */
+export const PROBE_ENABLED = process.env.GW_PROBE_ENABLED !== 'false'
+
+import { resolveProbeIntervalMs, selectProbeTargets } from '@/lib/probe-config'
+export { resolveProbeIntervalMs, selectProbeTargets }
+
 const PROBE_TIMEOUT_MS = 10_000
 const MAX_LOGS = 1000
 /** 全量探测时的并发上限：SQLite 单写者，并发过高只会互相 SQLITE_BUSY */
@@ -250,7 +258,7 @@ export async function probeChannelById(channelId: string): Promise<ProbeResult> 
 /** 全量探测启用中的渠道，并清理历史日志 */
 export async function probeAllChannels(): Promise<void> {
   try {
-    const channels = await db.channel.findMany({ where: { enabled: true }, select: { id: true } })
+    const channels = await db.channel.findMany({ where: { enabled: true }, select: { id: true, metadata: true } }).then(selectProbeTargets)
     // 分批并发：SQLite 写并发受限，全量 Promise.allSettled 会互相 SQLITE_BUSY
     const queue = [...channels]
     const workers = Array.from({ length: Math.min(PROBE_CONCURRENCY, queue.length) }, async () => {
@@ -286,6 +294,10 @@ export function startProbeScheduler(): void {
   const g = globalThis as unknown as { __gwProbeTimer?: ReturnType<typeof setInterval>; __gwProbeStarted?: boolean }
   if (g.__gwProbeStarted) return
   g.__gwProbeStarted = true
+  if (!PROBE_ENABLED) {
+    log.info('主动探测已关闭（GW_PROBE_ENABLED=false），熔断恢复依赖半开试探')
+    return
+  }
   setTimeout(() => void probeAllChannels(), 5_000)
   g.__gwProbeTimer = setInterval(() => void probeAllChannels(), PROBE_INTERVAL_MS)
   log.info('探测调度器已启动', { intervalSec: PROBE_INTERVAL_MS / 1000 })
