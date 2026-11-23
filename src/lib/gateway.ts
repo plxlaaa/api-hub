@@ -40,6 +40,27 @@ async function recordForwardFailure(channelId: string, errorMsg: string, trip = 
       db.setting.findUnique({ where: { key: 'cbThreshold' } }),
     ])
     if (cbOn?.value === 'off') return
+    // 滑窗成功率熔断（并行第二路径）：连败计数抓不到的「间歇性失败」渠道在这里兜底。
+    // 触发即摘除，恢复复用半开试探（成功即回切）；已熔断渠道不再重复判定。
+    const w = emitWindowResult(channelId, false)
+    if (w.tripped) {
+      const cur = await db.channel
+        .update({ where: { id: channelId }, data: { failStreak: { increment: 1 }, lastError: redactSecrets(errorMsg, 300) }, select: { autoDisabled: true, name: true } })
+        .catch(() => null)
+      if (cur && !cur.autoDisabled) {
+        await db.channel
+          .updateMany({ where: { id: channelId, autoDisabled: false }, data: { autoDisabled: true, autoDisabledAt: new Date() } })
+          .catch(() => {})
+        log.warn('滑动窗口成功率过低，渠道已自动熔断摘除', {
+          channelId,
+          channel: cur.name,
+          window: WINDOW_SIZE,
+          successRate: `${Math.round(w.successRate * 100)}%`,
+        })
+        notifyChannelEvent('channel_disabled', cur.name, `最近 ${WINDOW_SIZE} 次调用成功率仅 ${Math.round(w.successRate * 100)}%（间歇性失败），渠道已自动摘除；半开试探成功后会自动恢复`)
+      }
+      return
+    }
     // 原子自增，避免与探测侧的陈旧读-绝对值回写互相覆盖
     const updated = await db.channel.update({
       where: { id: channelId },
@@ -82,10 +103,12 @@ async function recordForwardFailure(channelId: string, errorMsg: string, trip = 
  * 实现独立在 lib/half-open.ts（纯模块，单测直连）；此处只做转发循环的占位联动。
  */
 import { halfOpenEligible, markProbing, clearProbing } from '@/lib/half-open'
+import { emitWindowResult, WINDOW_SIZE } from '@/lib/window-breaker'
 
 /** 转发成功：清零失败计数；半开试探成功则同步恢复渠道（真实流量驱动，不等探测周期） */
 async function recordForwardSuccess(channelId: string): Promise<void> {
   try {
+    emitWindowResult(channelId, true)
     await db.channel.updateMany({ where: { id: channelId, failStreak: { not: 0 } }, data: { failStreak: 0 } })
     const restored = await db.channel.updateMany({
       where: { id: channelId, autoDisabled: true },
