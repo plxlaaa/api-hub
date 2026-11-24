@@ -476,6 +476,7 @@ async function dispatchChatCompletions(
   const failures: string[] = []
   // 图片降级整流：每请求最多一次（学习 cc-switch per-provider retry flag，防循环）
   let rectifiedImages = false
+  let rateLimitRetried = false // 限流退避重试：每请求最多一次，防循环
 
   for (const [tryIdx, { cfg, ch }] of ordered.entries()) {
     // 故障转移上限：metadata.maxAttempts 限制最多实际尝试的渠道数（省时省日志，防止坏请求烧穿全部渠道）
@@ -544,6 +545,33 @@ async function dispatchChatCompletions(
       void recordForwardFailure(ch.id, msg)
       void logRequest({ channelName: ch.name, model: requestedModel, targetModel: modelForChannel, ok: false, latencyMs, tokenName: token.name, stream: isStream, attempt: tryIdx + 1, error: msg })
       continue
+    }
+
+    // 限流退避重试（学习 one-api 429 自动重试）：上游 TPM/RPM 限流是瞬时的，
+    // 公益站场景换渠道同样限流，等待 Retry-After 后同渠道重试一次往往就过了。
+    // 每请求最多重试一次（防循环）；等待期间客户端断开则直接放弃。
+    if (res.status === 429 && !rateLimitRetried && !req.signal.aborted) {
+      rateLimitRetried = true
+      const retryAfterRaw = Number(res.headers.get('retry-after'))
+      const waitMs = Math.min(Number.isFinite(retryAfterRaw) && retryAfterRaw > 0 ? retryAfterRaw * 1000 : 3_000, 10_000)
+      log.info('上游限流，退避后同渠道重试', { channel: ch.name, waitMs, attempt: tryIdx + 1 })
+      await new Promise((r) => setTimeout(r, waitMs))
+      if (req.signal.aborted) return new Response(null, { status: 499 })
+      const retryRes = await fetch(primaryUrl, {
+        method: 'POST',
+        headers: adapter.buildHeaders(ch.apiKey),
+        body: upstreamBody,
+        signal: AbortSignal.any([req.signal, AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)]),
+        cache: 'no-store',
+      }).catch(() => null)
+      if (retryRes?.ok) {
+        log.info('限流退避重试成功', { channel: ch.name })
+        res = retryRes
+      } else {
+        // 重试仍 429/失败：释放连接，保持原 429 响应落入下方 failover 分支
+        void retryRes?.body?.cancel().catch(() => {})
+        log.info('限流退避重试仍限流，转移下一渠道', { channel: ch.name })
+      }
     }
 
     if (!res.ok) {
