@@ -32,6 +32,13 @@ jobs:
           cp install-api-hub.ps1 doctor.mjs "pkg/api-hub-${V}-windows-x64/"
           (cd pkg && zip -rq "../dist/api-hub-${V}-windows-x64.zip" "api-hub-${V}-windows-x64")
 
+          # Android (Termux arm64) —— 脚本包：目标机源码构建（node:sqlite 零原生依赖）
+          # 附件名用 android 而非 termux：Release 页一眼认出手机入口
+          # 专项文档 TERMUX.md 维护在引导仓 api-hub-termux（不进主仓）
+          mkdir -p "pkg/api-hub-${V}-android"
+          cp install-termux.sh doctor.mjs "pkg/api-hub-${V}-android/"
+          (cd pkg && zip -rq "../dist/api-hub-${V}-android.zip" "api-hub-${V}-android")
+
           # Docker
           mkdir -p "pkg/api-hub-${V}-docker"
           cp Dockerfile docker-compose.yml .env.example doctor.mjs "pkg/api-hub-${V}-docker/"

@@ -21,7 +21,7 @@
 | 🔐 管理安全 | 首次自设用户名+密码（scrypt 加盐哈希，明文不落盘）；一次性设置令牌防抢注；登录 5 次错锁 10 分钟；HttpOnly 会话 Cookie 防 XSS 窃取 |
 | 🛡️ 后端加固 | 客户端断开即中止上游请求（不白烧额度）；上游错误体密钥自动脱敏；渠道地址默认禁内网（防 SSRF，字面量 + DNS 解析双重判定）；SQLite WAL + 忙等超时；老库启动自动补列（幂等迁移） |
 | 🖥️ 管理台 | 桌面侧栏布局 / 窄屏底部 tab 自适应；明暗双主题；全局页面头；公开模型广场（脱敏状态页） |
-| 📦 部署 | Linux 脚本 / Windows 脚本 / Docker Compose / 免依赖 tarball 四种装法；`node doctor.mjs` 环境自检；Release 自带三平台包 + sha256 |
+| 📦 部署 | Linux / Windows / **Android (Termux)** / Docker 四种装法；`node doctor.mjs` 环境自检；Release 自带四平台包 + sha256；Android 版含开机自启（Termux:Boot）+ 看门狗（健康 3 连败自动重启） |
 | 🧰 部署物料 | 仓库自带 `deploy/`：systemd unit、nginx 反代（含HTTP/2 版本适配）、logrotate、环境变量样例、Windows 服务注册/卸载脚本 |
 
 ## 界面预览
