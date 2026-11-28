@@ -6,7 +6,9 @@ import { db } from '@/lib/db'
 
 // 凭据文件位置：项目根目录下的 db/ 目录（与 SQLite 同目录，均为本机文件）
 // 明文密码永不落盘，只存 scrypt 哈希；文件权限会收紧为仅当前用户可读写。
-const CREDENTIALS_DIR = path.resolve(process.cwd(), 'db')
+const CREDENTIALS_DIR = process.env.GW_DATA_DIR
+  ? path.join(path.resolve(process.env.GW_DATA_DIR), 'db')
+  : path.resolve(process.cwd(), 'db')
 export const CREDENTIALS_PATH = path.join(CREDENTIALS_DIR, 'credentials.env')
 export const SETUP_TOKEN_PATH = path.join(CREDENTIALS_DIR, 'setup-token.txt')
 const DB_PASSWORD_KEY = 'adminPasswordHash'

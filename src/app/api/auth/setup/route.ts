@@ -1,6 +1,7 @@
 import { isInitialized, setupAdmin, withSessionCookie, jsonWithCookie } from '@/lib/auth'
 import { verifySetupToken, consumeSetupToken } from '@/lib/credentials'
 import { resolveRequestId, jsonError } from '@/lib/api-response'
+import { isAuthDisabled } from '@/lib/local-app'
 
 export const dynamic = 'force-dynamic'
 
@@ -28,7 +29,7 @@ export async function POST(req: Request) {
   // 一次性设置令牌校验（防公网暴露时被抢注）：令牌只在本机 db/setup-token.txt / 控制台
   // 本地应用模式（Android APK：网关只绑 127.0.0.1，公网碰不到初始化接口）跳过令牌校验——
   // 手机上没有终端，用户看不到该文件，要求输入等于永久卡死
-  if (process.env.GW_AUTH_DISABLED !== '1') {
+  if (!isAuthDisabled()) {
     const ok = await verifySetupToken(typeof setupToken === 'string' ? setupToken : '')
     if (!ok) {
       return jsonError(

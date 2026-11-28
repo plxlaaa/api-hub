@@ -4,6 +4,7 @@ import { db } from '@/lib/db'
 import { loadCredentials, saveCredentials } from '@/lib/credentials'
 import { checkRateLimit, hitRateLimit, resetRateLimit } from '@/lib/rate-limit'
 import { resolveRequestId, jsonUnauthorized } from '@/lib/api-response'
+import { isAuthDisabled } from '@/lib/local-app'
 
 const SETTING_JWT_SECRET = 'jwtSecret'
 const TOKEN_EXPIRES = '30d'
@@ -130,8 +131,9 @@ function tokenFromRequest(req: Request): string {
 
 export async function requireAdmin(req: Request): Promise<Response | null> {
   // 本地应用模式（Android APK 等）：网关只绑 127.0.0.1，无外网暴露，
-  // 免认证直进管理台——手机上没有终端，无法查看 setup-token/密码
-  if (process.env.GW_AUTH_DISABLED === '1') return null
+  // 免认证直进管理台——手机上没有终端，无法查看 setup-token/密码。
+  // 双通道判定见 local-app.ts（env + 标记文件，文件通道不依赖进程 env）
+  if (isAuthDisabled()) return null
   const token = tokenFromRequest(req)
   if (!token) return unauthorized(req)
   try {

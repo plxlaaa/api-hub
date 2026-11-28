@@ -12,7 +12,9 @@ import { log } from '@/lib/logger'
 // - WAL：读写不互斥，探测调度器写日志的同时网关仍可读
 // - busy_timeout：写锁竞争时等待而不是立刻报错
 // 这三项在首次连接时通过 $queryRaw 设置（PRAGMA 是连接级语句，需在连接建立后执行）。
-const dbDir = path.join(process.cwd(), 'db')
+const dbDir = process.env.GW_DATA_DIR
+  ? path.join(path.resolve(process.env.GW_DATA_DIR), 'db')
+  : path.join(process.cwd(), 'db')
 const dbFile = path.join(dbDir, 'custom.db')
 const databaseUrl = `file:${dbFile}?connection_limit=1`
 
