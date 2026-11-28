@@ -29,6 +29,7 @@ import { RequestLogsTab } from '@/components/request-logs-tab'
 import { TokensTab } from '@/components/tokens-tab'
 import { UsageTab } from '@/components/usage-tab'
 import { ThemeToggle } from '@/components/theme-toggle'
+import { UpdateMenu } from '@/components/update-menu'
 import { cn } from '@/lib/utils'
 
 interface Overview {
@@ -241,6 +242,7 @@ function Shell({ onLogout }: { onLogout: () => void }) {
             <div className="ml-auto flex items-center gap-1.5">
               <HealthPill />
               <ThemeToggle />
+              <UpdateMenu />
               <Button
                 size="sm"
                 variant="ghost"

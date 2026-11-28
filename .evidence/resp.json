@@ -1,0 +1,1 @@
+{"id":"msg_e0fd333abcefc88f","object":"chat.completion","created":1791112107,"model":"claude","choices":[{"index":0,"message":{"role":"assistant","content":"通了"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10372,"completion_tokens":4,"total_tokens":10376}}

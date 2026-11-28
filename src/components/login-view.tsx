@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { UpdateMenu } from '@/components/update-menu'
 
 export function LoginView({ onAuth }: { onAuth: () => void }) {
   const [initialized, setInitialized] = useState<boolean | null>(null)
@@ -19,7 +20,14 @@ export function LoginView({ onAuth }: { onAuth: () => void }) {
   useEffect(() => {
     fetch('/api/auth/status')
       .then((r) => r.json())
-      .then((d) => setInitialized(Boolean(d.initialized)))
+      .then((d) => {
+        // 本地应用模式（Android APK：网关只绑 127.0.0.1）：免认证直进
+        if (d.authDisabled) {
+          onAuth()
+          return
+        }
+        setInitialized(Boolean(d.initialized))
+      })
       .catch(() => setInitialized(false))
   }, [])
 
@@ -57,7 +65,11 @@ export function LoginView({ onAuth }: { onAuth: () => void }) {
   const isSetup = initialized === false
 
   return (
-    <div className="min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-emerald-50 via-white to-zinc-50 dark:from-zinc-900 dark:via-zinc-800 dark:to-zinc-900">
+    <div className="relative min-h-screen flex items-center justify-center p-4 bg-gradient-to-br from-emerald-50 via-white to-zinc-50 dark:from-zinc-900 dark:via-zinc-800 dark:to-zinc-900">
+      {/* 右上角菜单：登录/初始化被卡住时，「检查更新」是唯一的自救入口 */}
+      <div className="absolute right-3 top-3 z-10">
+        <UpdateMenu />
+      </div>
       <Card className="w-full max-w-sm">
         <CardHeader className="text-center">
           <div className="mx-auto mb-2 flex h-12 w-12 items-center justify-center rounded-xl bg-primary/10">

@@ -1,0 +1,10 @@
+▲ Next.js 16.1.3
+- Local:         http://hk-qingyan-claw-v9:3111
+- Network:       http://hk-qingyan-claw-v9:3111
+
+✓ Starting...
+{"ts":"2026-10-12T13:35:58.879Z","level":"info","msg":"使用 node-sqlite 纯绑定驱动（无 Prisma 引擎）"}
+✓ Ready in 289ms
+{"ts":"2026-10-12T13:35:58.892Z","level":"info","msg":"SQLite 就绪","dbFile":"/home/z/my-project/full-stack/.next/standalone/db/custom.db","journalMode":"WAL","busyTimeoutMs":5000,"autoCreated":false}
+{"ts":"2026-10-12T13:35:58.895Z","level":"info","msg":"探测调度器已启动","intervalSec":60}
+{"ts":"2026-10-12T13:35:59.115Z","level":"info","msg":"使用 node-sqlite 纯绑定驱动（无 Prisma 引擎）"}

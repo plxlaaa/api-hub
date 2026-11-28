@@ -129,6 +129,9 @@ function tokenFromRequest(req: Request): string {
 }
 
 export async function requireAdmin(req: Request): Promise<Response | null> {
+  // 本地应用模式（Android APK 等）：网关只绑 127.0.0.1，无外网暴露，
+  // 免认证直进管理台——手机上没有终端，无法查看 setup-token/密码
+  if (process.env.GW_AUTH_DISABLED === '1') return null
   const token = tokenFromRequest(req)
   if (!token) return unauthorized(req)
   try {
