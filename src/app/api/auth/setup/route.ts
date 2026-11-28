@@ -26,13 +26,17 @@ export async function POST(req: Request) {
     return jsonError(409, '管理员已设置，请直接登录', requestId)
   }
   // 一次性设置令牌校验（防公网暴露时被抢注）：令牌只在本机 db/setup-token.txt / 控制台
-  const ok = await verifySetupToken(typeof setupToken === 'string' ? setupToken : '')
-  if (!ok) {
-    return jsonError(
-      401,
-      '设置令牌无效。请在本机查看 db/setup-token.txt（或服务器启动日志）后粘贴',
-      requestId
-    )
+  // 本地应用模式（Android APK：网关只绑 127.0.0.1，公网碰不到初始化接口）跳过令牌校验——
+  // 手机上没有终端，用户看不到该文件，要求输入等于永久卡死
+  if (process.env.GW_AUTH_DISABLED !== '1') {
+    const ok = await verifySetupToken(typeof setupToken === 'string' ? setupToken : '')
+    if (!ok) {
+      return jsonError(
+        401,
+        '设置令牌无效。请在本机查看 db/setup-token.txt（或服务器启动日志）后粘贴',
+        requestId
+      )
+    }
   }
   const token = await setupAdmin(name, password)
   await consumeSetupToken() // 建号成功 → 令牌即焚
